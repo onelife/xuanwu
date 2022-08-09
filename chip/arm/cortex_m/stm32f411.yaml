@@ -1,0 +1,98 @@
+chip:
+  name: stm32f411
+  arch: arm
+  mode: cortex_m
+  # 0x08000000: Flash memory
+  # 0x1FFF0000: system memory
+  # 0x20000000: SRAM
+  boot: 0x08000000
+  peripherals:
+    - "Flash: Main":
+        type: memory
+        base: 0x08000000
+        size: 0x80000
+    - "Flash: System":
+        type: memory
+        base: 0x1FFF0000
+        size: 0x7800
+    - SRAM:
+        type: memory
+        base: 0x20000000
+        size: 0x20000
+    - SRAM_BB:
+        type: bitband_memory
+        base: 0x20000000
+        size: 0x100000
+        alias: 0x22000000
+
+    - PPB:  # private peripheral bus
+        type: peripheral
+        base: 0xE0000000
+        size: 0x10000
+    - SCID:  # system control and ID registers not in the SCB
+        type: core
+        base: 0xE000E000
+        size: 0x10
+        interrupt_lines: 7
+    - SYSTICK:  # system timer
+        type: core
+        base: 0xE000E010
+        size: 0x10
+        step: 128
+    - NVIC:  #  nested vectored interrupt controller
+        type: core
+        base: 0xE000E100
+        size: 0x3F0
+        interrupt_lines: 7
+        priority_bits: 4
+    - SCB:  # system control block
+        type: core
+        base: 0xE000ED00
+        size: 0x40
+        cpuid: 0x410FC240
+    - CP:  # coprocessor
+        type: core
+        base: 0xE000ED88
+        size: 0x4
+    - DBG:  # debug system
+        type: core
+        base: 0xE000EDF0
+        size: 0x10
+    - DWT:  # data watchpoint trigger
+        type: core
+        base: 0xE0001000
+        size: 0x1000
+
+    - PERIF_BB:
+        type: bitband_peripheral
+        base: 0x40000000
+        size: 0x100000
+        alias: 0x42000000
+    - GPIOA:
+        type: core
+        base: 0x40020000
+        size: 0x28
+    - GPIOB:
+        type: core
+        base: 0x40020400
+        size: 0x28
+    - GPIOC:
+        type: core
+        base: 0x40020800
+        size: 0x28
+    - GPIOD:
+        type: core
+        base: 0x40020C00
+        size: 0x28
+    - GPIOE:
+        type: core
+        base: 0x40021000
+        size: 0x28
+    - GPIOF:
+        type: core
+        base: 0x40021C00
+        size: 0x28
+    - RCC:  # reset and clock control
+        type: core
+        base: 0x40023800
+        size: 0x90

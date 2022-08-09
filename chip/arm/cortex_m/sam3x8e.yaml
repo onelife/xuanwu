@@ -1,0 +1,120 @@
+chip:
+  name: sam3x8e
+  arch: arm
+  mode: cortex_m
+  # 0x00100000: ROM
+  # 0x00080000: Flash bank 0
+  # 0x000C0000: Flash bank 1
+  boot: 0x00080000
+  peripherals:
+    - "Flash":
+        type: memory
+        base: 0x00080000
+        size: 0x80000
+    # - "Flash: System":
+    #     type: memory
+    #     base: 0x1FFF0000
+    #     size: 0x7800
+    - SRAM0:
+        type: memory
+        base: 0x20000000
+        size: 0x10000
+    - SRAM0_RM:
+        type: remap
+        base: 0x20000000
+        size: 0x10000
+        alias: 0x20070000
+    - SRAM1:
+        type: memory
+        base: 0x20080000
+        size: 0x8000
+    - SRAM_BB:
+        type: bitband_memory
+        base: 0x20000000
+        size: 0x100000
+        alias: 0x22000000
+
+    - PPB:  # private peripheral bus
+        type: peripheral
+        base: 0xE0000000
+        size: 0x10000
+    - SCID:  # system control and ID registers not in the SCB
+        type: core
+        base: 0xE000E000
+        size: 0x10
+        interrupt_lines: 7
+    - SYSTICK:  # system timer 
+        type: core
+        base: 0xE000E010
+        size: 0x10
+        # step: 128
+    - NVIC:  #  nested vectored interrupt controller
+        type: core
+        base: 0xE000E100
+        size: 0x3F0
+        interrupt_lines: 7
+        priority_bits: 4
+    - SCB:  # system control block
+        type: core
+        base: 0xE000ED00
+        size: 0x40
+        cpuid: 0x412FC230
+    - DBG:  # debug system
+        type: core
+        base: 0xE000EDF0
+        size: 0x10
+    - DWT:  # data watchpoint trigger
+        type: core
+        base: 0xE0001000
+        size: 0x1000
+
+    - PERIF_BB:
+        type: bitband_peripheral
+        base: 0x40000000
+        size: 0x100000
+        alias: 0x42000000
+    - PMC:  # power management controller
+        type: core
+        base:  0x400E0600
+        size: 0x110
+    - GPIOA:
+        type: core
+        base: 0x400E0E00
+        size: 0xEC
+    - GPIOB:
+        type: core
+        base: 0x400E1000
+        size: 0xEC
+    - GPIOC:
+        type: core
+        base: 0x400E1200
+        size: 0xEC
+    - GPIOD:
+        type: core
+        base: 0x400E1400
+        size: 0xEC
+    - GPIOE:
+        type: core
+        base: 0x400E1600
+        size: 0xEC
+    - GPIOF:
+        type: core
+        base: 0x400E1800
+        size: 0xEC
+    - ADC:
+        type: core
+        base: 0x400C0000
+        size: 0xEC
+    - UART:  # universal asynchronous receiver transceiver
+        type: core
+        base:  0x400E0800
+        size: 0x24
+        baudrate: 115200
+    - PWM:  # pulse width modulation
+        type: core
+        base: 0x40094000
+        size: 0x300
+    - UOTGHS:
+        type: core
+        base: 0x400AC800
+        size: 0x34
