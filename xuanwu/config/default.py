@@ -8,11 +8,16 @@ from os import path, sep
 from typing import Dict, Any
 
 
-__all__ = ["BASE_DIR", "LOGGING_CONFIG"]
+__all__ = ["BASE_DIR", "RESOURCE", "LOGGING_CONFIG"]
 
 
 BASE_DIR = path.dirname(path.dirname(__file__))
 """Module root directory."""
+
+RESOURCE = {
+    "chip": path.join(BASE_DIR, "..", "chip"),
+    "gdb": path.join(BASE_DIR, "..", "gdb", "features"),
+}
 
 LOGGING_CONFIG: Dict[str, Any] = {
     "version": 1,

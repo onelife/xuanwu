@@ -42,6 +42,8 @@ class MemoryController(object):
 
     def get_map(self, start: int, end: int, no_buf_only: Optional[bool] = False) -> List[MemoryInfo]:
         ret = []
+        if end < start:
+            return ret
         for record in self._registry:
             if no_buf_only and record.buffer:
                 continue
@@ -51,6 +53,8 @@ class MemoryController(object):
 
     def get_io(self, start: int, end: int) -> List[MemoryIoInfo]:
         ret = []
+        if end < start:
+            return ret
         for record in self._io_registry:
             if (record.start <= start < record.end) or (record.start < end <= record.end):
                 ret.append(record)

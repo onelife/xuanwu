@@ -2,5 +2,6 @@ unicorn ~= 2.0.0
 capstone ~= 4.0.2
 pyyaml ~= 6.0
 pyserial ~= 3.5.0
+pyelftools ~= 0.29
 click~=8.0.3
 colorlog~=5.0.1

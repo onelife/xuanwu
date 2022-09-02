@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 
 from os import path
-from typing import Optional, Any
+from typing import Optional, Union, Any
 
 from unicorn import Uc, UC_ARCH_ARM, UC_MODE_ARM, UC_MODE_MCLASS, UC_MODE_THUMB
-
 # from unicorn import UC_HOOK_INTR, UC_HOOK_CODE, UC_HOOK_BLOCK
 from capstone import Cs, CS_ARCH_ARM, CS_MODE_ARM, CS_MODE_MCLASS, CS_MODE_THUMB
 
@@ -15,6 +14,7 @@ import yaml
 from .register import RegisterController
 from .memory import MemoryController
 from .loader import ProgramLoader
+from .rsp import RemoteSerialProtocol
 from .exception import XwInvalidParameter, XwInvalidChipInformation
 
 
@@ -51,7 +51,7 @@ ADDRESS_64BIT = {}
 class XuanWu(object):
     """xxx"""
 
-    def __init__(self, chip: str, code: str, **kwargs: Any) -> None:
+    def __init__(self, chip: str, code: str, rsp: Union[bool, int] = False, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         # load chip info
         if not path.exists(chip):
@@ -74,6 +74,8 @@ class XuanWu(object):
         # self.box.hook_add(UC_HOOK_INTR, hook_int)
         self.dasm = Cs(self._arch[1], self._mode[1])
         self.dasm.detail = True
+        # endian and address size
+        # TODO: UC_MODE_LITTLE_ENDIAN ?
         self.endian = "big" if self._chip.get("arch") in BIG_ENDIAN else "little"
         self.is_64bit = self._chip.get("arch") in ADDRESS_64BIT
         # create register controller
@@ -97,6 +99,14 @@ class XuanWu(object):
             raise XwInvalidParameter("Invalid code path: {code}")
         self._loader = ProgramLoader(code, 0)
         self._loader.load(self.mem)
+        # gdb rsp
+        if rsp:
+            if isinstance(rsp, bool):
+                self.rsp = RemoteSerialProtocol(self.box, self.mem, self.reg, self._arch[0], self._mode[0])
+            else:
+                self.rsp = RemoteSerialProtocol(self.box, self.mem, self.reg, self._arch[0], self._mode[0], rsp)
+        else:
+            self.rsp = None
 
     def show_inst(self, start_offset: int, end_offset: int) -> None:
         start = self.reg.pc + 4 * start_offset
@@ -155,7 +165,10 @@ class XuanWu(object):
         from unicorn import UcError, UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED
 
         try:
-            self.box.emu_start(self.reg.pc_t, until, count)
+            if not self.rsp:
+                self.box.emu_start(self.reg.pc_t, until, count)
+            else:
+                self.rsp.run()
         except UcError as err:
             if err.errno in (UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED):
                 self.show_inst(-1, 1)
