@@ -22,5 +22,5 @@ while True:
 __setup = stack.f_globals.get("__file__") and (path.basename(stack.f_globals.get("__file__")) == "setup.py")
 
 if not __setup:
-    # sys.path.append(dirname(__file__))
+    sys.path.append(path.dirname(__file__))
     from .xuanwu import *

@@ -3,7 +3,7 @@
 # from os import path, fstat
 from collections import namedtuple
 from struct import Struct
-from typing import Optional, Any, Dict, List, Tuple, Set, Iterator, Callable
+from typing import Optional, Any, Dict, List, Tuple, Iterator, Callable
 
 from unicorn import Uc, UC_PROT_ALL, UC_PROT_READ, UC_PROT_WRITE, UC_PROT_EXEC
 
@@ -415,6 +415,7 @@ class MemoryController(object):
         return self._box.mem_write(address, data)
 
     def read(self, address: int, size: int) -> bytearray:
+        # logger.info(f"read: 0x{address:08x}, {size}")
         return self._box.mem_read(address, size)
 
     def read_word(self, address: int) -> int:

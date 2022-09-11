@@ -162,7 +162,7 @@ class XuanWu(object):
                 print(f"[M] {inst.reg_name(reg)} = 0x{self.reg.read(reg):08x}")
 
     def run(self, until: Optional[int] = 0x0, count: Optional[int] = 0):
-        from unicorn import UcError, UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED
+        from unicorn import UcError, UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED, UC_ERR_INSN_INVALID, UC_ERR_FETCH_UNMAPPED
 
         try:
             if not self.rsp:
@@ -170,8 +170,16 @@ class XuanWu(object):
             else:
                 self.rsp.run()
         except UcError as err:
-            if err.errno in (UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED):
+            if err.errno in (UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED, UC_ERR_INSN_INVALID):
                 self.show_inst(-1, 1)
+            if err.errno in [UC_ERR_FETCH_UNMAPPED]:
+                print(f"pc: 0x{self.reg.pc:08x}")
+                print(f"r0: 0x{self.reg.r0:08x}")
+                print(f"r1: 0x{self.reg.r1:08x}")
+                print(f"r2: 0x{self.reg.r2:08x}")
+                print(f"r3: 0x{self.reg.r3:08x}")
+                print(f"r4: 0x{self.reg.r4:08x}")
+                print(f"r5: 0x{self.reg.r5:08x}")
             raise
 
     def reset(self) -> None:

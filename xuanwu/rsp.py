@@ -22,6 +22,11 @@ GDB_SIGNAL_TRAP = 5  # "SIGTRAP", "Trace/breakpoint trap"
 GDB_SIGNAL_BUS = 10  # "SIGBUS", "Bus error"
 GDB_SIGNAL_SEGV = 11  # "SIGSEGV", "Segmentation fault"
 
+# rom (rx)    : ORIGIN = 0x00080000, LENGTH = 0x00080000 /* Flash, 512K */
+# sram0 (rwx) : ORIGIN = 0x20000000, LENGTH = 0x00010000 /* sram0, 64K */
+# sram1 (rwx) : ORIGIN = 0x20080000, LENGTH = 0x00008000 /* sram1, 32K */
+# ram (rwx)   : ORIGIN = 0x20070000, LENGTH = 0x00018000 /* sram, 96K */
+
 
 class RemoteSerialProtocol(object):
     """GDB remote serial protocol"""
@@ -86,6 +91,28 @@ class RemoteSerialProtocol(object):
         self._box.emu_stop()
         logger.info(f"[R] WP 0x{address:08x}, {size}")
 
+    def _continue(self, count: int) -> str:
+        from unicorn import UcError, UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED, UC_ERR_INSN_INVALID
+
+        # execute instructions continuously
+        reply = None
+        try:
+            self._box.emu_start(self._reg.pc_t, 0, count=count)
+            reply = f"S{GDB_SIGNAL_TRAP:02x}"
+        except UcError as err:
+            logger.error(f"Emulation error: {type(err)}, {err}")
+            if err.errno in [UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED]:
+                reply = f"S{GDB_SIGNAL_SEGV:02x}"
+                # raise
+            elif err.errno == UC_ERR_INSN_INVALID:
+                reply = f"S{GDB_SIGNAL_ILL:02x}"
+                raise
+            else:
+                raise
+        except KeyboardInterrupt:
+            reply = f"S{GDB_SIGNAL_INT:02x}"
+        return reply
+
     def process_packet(self, packet: bytes) -> str:
         reply = None
         name, *params = packet.split(b":", 1)
@@ -101,9 +128,39 @@ class RemoteSerialProtocol(object):
             reply = b"".join([(self._reg.read(reg)).to_bytes(len_, "little") for reg, (_, len_) in self.reg_info.items()]).hex()
 
         elif name.startswith(b"m"):
+            from unicorn import UcError, UC_ERR_READ_UNMAPPED
+
             # reply value in memory
             addr, len_ = [int(num, 16) for num in name[1:].split(b",")]
-            reply = self._mem.read(addr, len_).hex()
+            try:
+                reply = self._mem.read(addr, len_).hex()
+            except UcError as err:
+                logger.error(f"Read memory @0x{addr:08x}: {type(err)}, {err}")
+                if err.errno == UC_ERR_READ_UNMAPPED:
+                    reply = "E02"
+                else:
+                    raise
+
+        elif name.startswith(b"p"):
+            num = int(name[1:], 16)
+            for reg, (num_, len_) in self.reg_info.items():
+                if num == num_:
+                    reply = (self._reg.read(reg)).to_bytes(len_, "little")
+                    break
+            else:
+                reply = "E01"
+
+        elif name.startswith(b"P"):
+            num_str, val_str = name[1:].split(b"=")
+            num = int(num_str, 16)
+            val = int(val_str, 16)
+            for reg, (num_, len_) in self.reg_info.items():
+                if num == num_:
+                    self._reg.write(reg, val)
+                    reply = "OK"
+                    break
+            else:
+                reply = "E01"
 
         elif name.startswith(b"q"):
             # query packet
@@ -171,21 +228,25 @@ class RemoteSerialProtocol(object):
                     logger.debug(f"{length}, {len(params[0])}")
                     reply = "E01"
                 else:
-                    self._mem.write(addr, params[0])
-                    reply = "OK"
+                    from unicorn import UC_ERR_WRITE_UNMAPPED
 
-        elif name.startswith(b"s"):
+                    try:
+                        self._mem.write(addr, params[0])
+                        reply = "OK"
+                    except UcError as err:
+                        logger.error(f"Write memory @0x{addr:08x}: {type(err)}, {err}")
+                        if err.errno == UC_ERR_WRITE_UNMAPPED:
+                            reply = "E02"
+                        else:
+                            raise
+
+        elif name.startswith(b"s") or name.startswith(b"S"):
             # execute one instruction and stop
-            self._box.emu_start(self._reg.pc_t, 0, 1)
-            reply = f"S{GDB_SIGNAL_TRAP:02x}"
+            return self._continue(1)
 
-        elif name.startswith(b"c"):
+        elif name.startswith(b"c") or name.startswith(b"C"):
             # execute instructions continuously
-            try:
-                self._box.emu_start(self._reg.pc_t, 0, 0)
-                reply = f"S{GDB_SIGNAL_TRAP:02x}"
-            except KeyboardInterrupt:
-                reply = f"S{GDB_SIGNAL_INT:02x}"
+            return self._continue(0)
 
         elif name.startswith(b"Z"):
             # set breakpoint

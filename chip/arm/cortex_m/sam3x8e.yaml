@@ -110,6 +110,10 @@ chip:
         base:  0x400E0800
         size: 0x24
         baudrate: 115200
+    - SPI:  # Serial peripheral interface
+        type: core
+        base:  0x40008000
+        size: 0xEC
     - PWM:  # pulse width modulation
         type: core
         base: 0x40094000
