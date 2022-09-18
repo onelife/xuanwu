@@ -855,7 +855,9 @@ class ArmSamUart(ArmHardwareBase):
         from subprocess import Popen, PIPE, TimeoutExpired
 
         super().__init__(*args, **kwargs)
+        self._irq = PID.UART
         self._last_rx = 0
+        self._last_rx_new = False
         self._fix_after_read = self.fix_after_read
         self._fix_before_write = self.fix_before_write
         # ref: https://stackoverflow.com/questions/2291772/virtual-serial-device-in-python
@@ -890,24 +892,41 @@ class ArmSamUart(ArmHardwareBase):
     def tty_device(self):
         return self._tty
 
-    def fix_after_read(self, name: str, register: Register, data: int) -> int:
-        # name_ = ".".join([self.NAME, name])
-        if name == "SR":
-            sr = data
-            if self._serial.in_waiting > 0:
-                sr |= 1 << UART_SR.RXRDY
-            # if self._serial.in_waiting > 1:
-            #     sr |= 1 << UART_SR.OVRE
+    def system_clock_callback(self, box: Uc, address: int, size: int, user_data: Any) -> None:
+        cr = self.read_register("CR")
+        sr = data = self.read_register("SR")
+        if self._serial.in_waiting > 0:
+            if cr & (1 << UART_CR.RXEN):
+                if not self._last_rx_new:
+                    # self._last_rx = int.from_bytes(self._serial.read(self._serial.in_waiting + 10)[-1], "little")
+                    rx = self._serial.read(1)
+                    self._last_rx = int.from_bytes(rx, "little")
+                    # logger.debug(f"UART RX: {rx}")
+                    self._last_rx_new = True
+                data |= 1 << UART_SR.RXRDY
+            else:
+                _ = self._serial.read(self._serial.in_waiting + 128)
+        # if self._serial.in_waiting > 1:
+        #     sr |= 1 << UART_SR.OVRE
+        if cr & (1 << UART_CR.TXEN):
             # if self._serial.out_waiting <= 1:
             #     sr |= 1 << UART_SR.TXRDY
-            sr |= 1 << UART_SR.TXRDY
-            if sr != data:
-                self.write_register("SR", data)
-        elif name == "RHR":
-            if self._serial.in_waiting > 0:
-                # self._last_rx = int.from_bytes(self._serial.read(self._serial.in_waiting + 10)[-1], "little")
-                self._last_rx = int.from_bytes(self._serial.read(1), "little")
+            data |= 1 << UART_SR.TXRDY
+        if sr != data:
+            self.write_register("SR", data)
+        imr = self.read_register("IMR")
+        if imr & data and not self._ctl.is_irq_pending_or_active(self._irq):
+            self._ctl.set_irq_pending(self._irq)
+
+    def fix_after_read(self, name: str, register: Register, data: int) -> int:
+        # name_ = ".".join([self.NAME, name])
+        if name == "RHR":
+            sr = data_ = self.read_register("SR")
+            data_ &= ~(1 << UART_SR.RXRDY)
+            if sr != data_:
+                self.write_register("SR", data_)
             data = self._last_rx
+            self._last_rx_new = False
         return data
 
     def fix_before_write(self, name: str, register: Register, data: int, data_orig: int) -> int:
@@ -915,10 +934,6 @@ class ArmSamUart(ArmHardwareBase):
         if name == "CR":
             sr = self.read_register("SR")
             sr_orig = sr
-            if data & (1 << UART_CR.RXEN):
-                sr |= 1 << UART_SR.RXRDY
-            if data & (1 << UART_CR.TXEN):
-                sr |= 1 << UART_SR.TXRDY
             if data & ((1 << UART_CR.RSTRX) | (1 << UART_CR.RXDIS)):
                 sr &= ~(1 << UART_SR.RXRDY)
                 if data & (1 << UART_CR.RSTRX):
@@ -953,10 +968,12 @@ class ArmSamUart(ArmHardwareBase):
             new_val = val & ~data
             self.write_register(reg, new_val)
         elif name == "THR":
-            # if self._serial.out_waiting <= 1:
-            #     self._serial.write(data.to_bytes(1, "little"))
-            self._serial.write((data & 0xFF).to_bytes(1, "little"))
-            # logger.debug(f'[{name_:16s}]: Output "{(data & 0xFF).to_bytes(1, "little")}"')
+            cr = self.read_register("CR")
+            if cr & (1 << UART_CR.TXEN):
+                # if self._serial.out_waiting <= 1:
+                #     self._serial.write(data.to_bytes(1, "little"))
+                self._serial.write((data & 0xFF).to_bytes(1, "little"))
+                # logger.debug(f'[{name_:16s}]: Output "{(data & 0xFF).to_bytes(1, "little")}"')
         return data
 
 

@@ -129,6 +129,9 @@ class ArmHardwareController(object):
     def register_irq_gp(self, gp: int) -> None:
         self._irq_gp = gp
 
+    def is_irq_pending_or_active(self, irq: int) -> bool:
+        return irq in self._irq_pending or irq in self._irq_handling
+
     def set_irq_pending(self, irq: int) -> None:
         if irq not in self._irq_pending:
             # logger.debug(f"Interrupt: Add IRQ_{irq} in pending queue")
@@ -782,6 +785,7 @@ class ArmHardwareNvic(ArmHardwareBase):
     def reset(self):
         super().reset()
 
+    @staticmethod
     def _reg2irq(reg_val: int, reg_num: int) -> Set[int]:
         irqs = set()
         for i in range(32):
@@ -790,6 +794,7 @@ class ArmHardwareNvic(ArmHardwareBase):
             reg_val >>= 1
         return irqs
 
+    @staticmethod
     def _irq2reg(irq: int, to_ipr: Optional[bool] = False) -> Tuple[int]:
         if not to_ipr:
             offset = irq % 32
