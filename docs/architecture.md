@@ -71,7 +71,10 @@ key becomes the region name (it shows up in logs and in `mem.show_map()`).
 Common fields: `base`, `size`; plus `alias` for the three alias types. `core`
 entries take model-specific extras which are passed to the model's constructor
 as keyword arguments (`baudrate`, `bridge`, `dma_base`/`dma_size`, `cpuid`,
-`interrupt_lines`, `priority_bits`, `step`, `calib`, ...).
+`interrupt_lines`, `priority_bits`, `clock`, `cycles_per_instruction`, `calib`,
+...). A `dma_base`/`dma_size` pair declares a second register window for the
+peripheral's DMA block, which on the SAM3X sits 0x100 bytes after the
+peripheral's own registers.
 
 Bit-band windows never allocate real memory: the alias callback computes which
 bit of which word is addressed and performs a read-modify-write through the
@@ -203,6 +206,20 @@ Interrupt sources are registered as an `IrqOp` namedtuple
 external IRQs `0..239`; the SCB registers the system exceptions at negative
 indices (`SysTick` is `-1`, `PendSV` `-2`, `NMI` `-14`, ...), which is why the
 controller can treat both uniformly.
+
+### 7.1 The time base
+
+`arch/cortex_m/systick.py` is the only clock in the model, and it is driven by the
+same `UC_HOOK_CODE` mechanism as the interrupt engine: every executed instruction
+advances the counter by `cycles_per_instruction` (the chip YAML's `clock` gives
+the core frequency the time base is derived from, and `CALIB.TENMS` follows it).
+A period is `RVR + 1` cycles and the periods that elapsed are counted in one step,
+so the long-run rate is exact even when the factor is fractional.
+
+Unicorn does not report instruction costs, so `cycles_per_instruction` is an
+approximation, not a measurement: the default of 1 means "one cycle per
+instruction". `SysTick.cycles`, `.ticks` and `.elapsed_ms` expose the simulated
+time base, which is what tests assert on instead of wall-clock time.
 
 ## 8. GDB stub
 

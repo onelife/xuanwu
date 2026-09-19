@@ -285,9 +285,12 @@ examples/                runnable examples
 
 ## Documentation
 
+- [`docs/manual.zh-CN.md`](docs/manual.zh-CN.md) — 中文使用手册：安装、跑固件、串口、
+  GDB、semihosting、浮点、外部器件、构建测试固件、加芯片、排错（含可上手实例）
 - [`docs/architecture.md`](docs/architecture.md) — how the pieces fit together
 - [`docs/add-a-chip.md`](docs/add-a-chip.md) — supporting a new MCU
 - [`docs/debugging.md`](docs/debugging.md) — logging, GDB, serial bridges
+- [`tests/firmware/README.md`](tests/firmware/README.md) — the firmware tree and how it is built
 - [`CHANGELOG.md`](CHANGELOG.md) — what changed and why
 
 ## Status
@@ -298,9 +301,14 @@ it; the STM32F411 path is the more complete one. Known gaps:
 - the floating point model has two deliberate gaps: `CPACR` does not gate VFP
   execution and Unicorn's CPU model does not either, so a `NOCP` fault cannot be
   raised; lazy stacking is not modelled and `FPCCR.LSPACT` always reads as zero;
-- SysTick advances per basic block rather than per real cycle;
+- the time base advances one instruction at a time, scaled by a per-chip
+  `cycles_per_instruction`, because Unicorn does not report what an instruction
+  cost; `millis()` tracks simulated time, not wall-clock time;
 - PWM raises no interrupts, the ADC returns preset constants, SPI is byte-wide;
-- the device layer has two models (`led`, `spi_flash`) and no I2C bus yet.
+- the device layer has two models (`led`, `spi_flash`) and no I2C bus yet;
+- the test firmware for the Arduino MKR Zero (SAMD21) and the ST Nucleo-F767ZI
+  (STM32F767) is built and committed, but neither part has a chip description yet,
+  so nothing runs those images.
 
 ## License
 

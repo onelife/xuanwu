@@ -310,10 +310,36 @@ land on `gpio`; use that only for genuinely identical instances.
 
 ## 4. Add a firmware fixture and a test
 
-Put a prebuilt image in `tests/firmware/<chip>/` and the integration suite picks
-it up automatically: `tests/conftest.py` reads each ELF's lowest `PT_LOAD`
-address and matches it against `CHIP_BY_LOAD_ADDRESS`. For a new load-address
-range, add an entry there.
+Firmware is built from Arduino sketches, and `tests/firmware/board.yaml` is the
+matrix that says which sketch builds which board and which chip description runs
+it:
+
+```yaml
+  - name: stm32f103
+    board: Generic STM32F1 series
+    fqbn: STMicroelectronics:stm32:GenF1:pnum=GENERIC_F103C8TX
+    chip: stm32f103            # the description you just wrote
+    sketch: Blink_f103
+    output: stm32f103
+```
+
+Write the sketch as `tests/firmware/Blink_f103/Blink_f103.ino` (directory and file
+name must match), then:
+
+```bash
+python tests/firmware/build.py stm32f103   # builds it into tests/firmware/stm32f103/
+```
+
+Commit the `.elf` next to the other boards so the suite needs no toolchain. The
+integration suite then picks it up automatically, and
+`tests/conformance/test_firmware_matrix.py` checks that the sketch, the FQBN, the
+chip name and the output directory all agree.
+
+`board.yaml` is the authority rather than the image's load address, because two
+unrelated parts can share one: the STM32F411 and the STM32F767 both run from
+`0x08000000`. The load address is only a fallback, via `CHIP_BY_LOAD_ADDRESS` in
+`tests/conftest.py`, for hand-written firmware such as
+`tests/firmware/stm32f411/fpu_test/`.
 
 Then:
 
@@ -390,11 +416,13 @@ the UART and SPI models know about.
 
 Worth knowing before you rely on a particular area:
 
-- **`ArmHardwareNvic.REGISTERS` is a class attribute built in `__init__`.** Two
-  chips with different `interrupt_lines` in one process will fight over it.
-  Fixing that means moving the table onto the instance.
-- **SysTick counts per basic block**, not per cycle, so `millis()` advances only
-  proportionally to real time.
+- **SysTick counts instructions, not real cycles.** Unicorn does not report what an
+  instruction cost, so the counter advances once per executed instruction, scaled by
+  `cycles_per_instruction` (default 1, the "one cycle per instruction" approximation).
+  `millis()` therefore tracks *simulated* time, and its ratio to wall-clock time
+  depends on how fast the host executes. A chip that wants a firmware's millisecond
+  tick to cost fewer emulated instructions raises the factor; see the `clock` and
+  `cycles_per_instruction` fields in `stm32f411.yaml`.
 - **`CPACR` does not gate the FPU.** Unicorn executes VFP instructions whatever
   `CPACR` says and whatever CPU model is configured, and it offers no VFP
   instruction hook, so a `NOCP` UsageFault cannot be raised. Declaring the `FPU`
@@ -402,6 +430,8 @@ Worth knowing before you rely on a particular area:
   make the FPU switchable.
 - **The device layer has two models** (`led`, `spi_flash`) and no I2C bus, so a
   board whose sensors sit on I2C needs that peripheral and device first.
-- **`dma_base` support is SAM-specific** (`PDC`), and the current
-  `sam3x8e.yaml` UART DMA window does not match the datasheet; the conformance
-  suite records it as an expected failure.
+- **`dma_base` support is SAM-specific** (`PDC`). A peripheral's DMA block is a
+  second register window declared with `dma_base`/`dma_size`; on the SAM3X it sits
+  0x100 bytes after the peripheral's own registers, which is why the conformance
+  suite checks that it is mapped and does not overlap the main block rather than
+  that it fits inside it.

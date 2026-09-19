@@ -5,6 +5,124 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — the test firmware is built from sketches
+
+- **Arduino CLI replaces the system Arm compiler.** `docker/Dockerfile` installs the
+  Arduino CLI and the cores for the boards the test firmware targets, and each core
+  brings its own toolchain, so no distribution `gcc-arm-none-eabi` is needed. Four
+  images now build from a sketch in the repository:
+  `stm32f411` (Generic F411CEUx), `sam3x8e` (Arduino Due), `mkrzero` (Arduino MKR
+  Zero, SAMD21/Cortex-M0+) and `nucleo_f767zi` (ST Nucleo-F767ZI,
+  STM32F767/Cortex-M7). The first two are run by the suite; the other two are
+  built and committed as the physical entry point for supporting those parts.
+- `tests/firmware/board.yaml` is the matrix (sketch → board FQBN → chip
+  description) and `tests/firmware/build.py` drives `arduino-cli` from it:
+  `python tests/firmware/build.py [board...]`, `--list` to see it without building.
+- `tests/firmware/Blink_uart_m3/Blink_uart_m3.ino` is the Due sketch that used to
+  sit loose in `sam3x8e/`; the Arduino CLI only builds `X/X.ino`, so it moved into
+  a sketch directory. `Blink_m4.ino` and `Blink_f767zi.ino`/`Blink_mkrzero.ino` are
+  new — the STM32F411 image's source had been lost, so it can be rebuilt now.
+- The image is chosen by `board.yaml`, not by the load address: the STM32F411 and
+  the STM32F767 both run from `0x08000000`, so an address match would have run the
+  Cortex-M7 firmware against the Cortex-M4 description. The address stays as a
+  fallback for hand-written firmware, and
+  `tests/conformance/test_firmware_matrix.py` checks that every bundled `.elf`
+  lives under a declared output directory, that the sketches exist, and that the
+  boards which do have a chip description are the ones the suite parametrises.
+- `fpu_test/build.sh` finds its toolchain in `$CC`, on `PATH`, or in the Arduino
+  STM32 core (asking `arduino-cli` where its data directory is), so the hand-written
+  FP firmware rebuilds in the image too. Verified with no distribution
+  `arm-none-eabi-gcc` present.
+- `.map` files and `*.with_bootloader.*` images are ignored; the `.elf`/`.bin`/`.hex`
+  stay committed so running the tests needs no toolchain.
+- `requirements-dev.txt` now lists what the suite actually needs to run: `pyflakes`
+  and, importantly, `setuptools`/`wheel`. A fresh `python:3.12` image has neither,
+  because `pip install .` builds in an isolated environment — so
+  `test_setup_py_runs_without_the_runtime_dependencies` failed in a clean container
+  and passed in the hand-maintained one. Found by building the image.
+- `.dockerignore`: the build context was the whole repository, including several
+  megabytes of prebuilt firmware. The image only copies `README.md`, `MANIFEST.in`,
+  `setup.py`, `requirements*.txt`, `src/` and `docs/`.
+- The updated image was built and verified from scratch: the three cores are
+  present, there is no distribution Arm compiler, `fpu_test/build.sh` finds the
+  Arduino toolchain, all four sketches rebuild, and the full suite passes (276).
+
+### Added — a Chinese manual and runnable examples
+
+- `docs/manual.zh-CN.md` (中文使用手册): install, first run, the core API, serial
+  bridges, GDB, semihosting, floating point and the time base, external devices,
+  building test firmware with the Arduino CLI, the test suite, adding a chip and a
+  troubleshooting FAQ — with the real output of every command in it.
+- Five new scripts under `examples/`, each also a test
+  (`tests/integration/test_examples.py`, 9 cases): `uart_bridge.py` (read what the
+  firmware prints on its UART over the TCP bridge), `semihosting.py` (a `BKPT 0xAB`
+  trap serviced and captured), `fpu.py` (the FP frame with its negative control),
+  `devices.py` (the LED and the SPI flash driven from Python) and `unclaimed_io.py`
+  (the work list for an unimplemented chip).
+- `tests/unit/test_docs.py` keeps the documentation honest: relative links resolve,
+  paths in backticks exist, every example is mentioned in the manual, and the
+  manual's table of contents matches its headings.
+
+### Changed — history cleanup
+
+- `arch/base.py` no longer does `from unicorn.arm_const import *`: the register
+  table uses the `uc_arm` alias it already imported, which removes 31 pyflakes
+  warnings and one silent source of "works until the name is misspelled".
+- `config/__init__.py` imports `LOGGING_CONFIG` by name instead of relying on a
+  star import, so a typo would be an error rather than a `NameError` at import.
+- Removed unused imports from `chips.py` (typing.Optional), `loader.py`
+  (config.logger) and `arch/base.py` (typing.Dict/Tuple). What is left is the 14
+  pyflakes lines for the five deliberate re-export modules
+  (`arch/__init__.py`, `arch/armv7m.py`, `arch/atmel_sam.py`, `arch/stm_stm.py`,
+  `config/__init__.py`), which pair a star import with an explicit `__all__`.
+
+### Changed — the SysTick time base is explicit instead of a magic step
+
+- SysTick's counter used to be decremented by a bare per-chip `step` (128 on the
+  STM32F411, unset elsewhere) with no stated meaning. It now has a documented
+  model: the counter advances once per executed instruction by
+  `cycles_per_instruction` (default 1, "one cycle per instruction"), a period is
+  `RVR + 1` cycles, and the elapsed periods are counted in one step so a
+  fractional factor keeps the long-run rate exact. `step` is still accepted as an
+  alias.
+- New per-chip `clock` field (STM32F411: 100 MHz, SAM3X8E: 84 MHz). The
+  `CALIB.TENMS` value is derived from it instead of being a hard-coded 0x2904 that
+  corresponded to no real clock, and can still be overridden per chip with
+  `calib`.
+- `SysTick.cycles`, `SysTick.ticks` and `SysTick.elapsed_ms` expose the simulated
+  time base, so tests can assert on simulated time instead of wall-clock time.
+- `CSR.COUNTFLAG` is no longer writable by the guest, `CVR` reads back as the
+  running down-count, and writing `CVR` restarts the period.
+
+### Fixed — `ArmHardwareNvic.REGISTERS` was a class attribute
+
+- The register table depends on `interrupt_lines`/`priority_bits` and was assigned
+  to the *class* from `__init__`, so an already-created controller reported
+  whichever table was built last as soon as a second one existed. It is now an
+  instance attribute; nothing is cached on the class.
+- While building that table the priority mask was computed into `mask`, which the
+  following `for ... in REGISTERS_TEMPLATE` loop immediately reused as its loop
+  variable: `priority_bits` had no effect on the `IPR` registers. The mask is now
+  applied, so an unimplemented priority bit cannot be written (the SAM3X8E and
+  STM32F411 both use four implemented bits).
+
+### Fixed — the conformance check for DMA windows was wrong
+
+- It required a `dma_base`/`dma_size` window to lie *inside* the peripheral's own
+  block, which cannot hold: on the SAM3X the PDC sits 0x100 bytes after the
+  peripheral's registers (the UART's is at 0x400E0900 while the UART block the
+  model implements ends at 0x400E0824), and an overlapping IO window is rejected
+  by the memory controller at access time. The suite now checks that the window is
+  mapped, non-empty, and does not overlap the main block — and the recorded
+  expected failure is gone.
+
+### Added — line-ending policy
+
+- `.gitattributes` pins `* text=auto eol=lf` and marks the firmware images as
+  binary. The repository is edited on Windows and tested in a Linux container, and
+  without it every checkout from one side showed up as a whole-file diff on the
+  other.
+
 ### Added — floating-point support
 
 - The Cortex-M FP extension is modelled, so an Armv7E-M core runs VFP code and
