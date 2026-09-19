@@ -6,8 +6,10 @@ import shutil
 import struct
 import sys
 from pathlib import Path
+from typing import Dict, Optional
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
@@ -20,12 +22,18 @@ CHIP_DIR = SRC_DIR / "xuanwu" / "data" / "chips" / "arm" / "cortex_m"
 # Test firmware lives outside the package.
 FIRMWARE_DIRS = (REPO_ROOT / "tests" / "firmware",)
 
+# How every bundled image is built: which board, which sketch, which chip.
+FIRMWARE_CONFIG = REPO_ROOT / "tests" / "firmware" / "board.yaml"
+
 CHIPS = {
     "stm32f411": CHIP_DIR / "stm32f411.yaml",
     "sam3x8e": CHIP_DIR / "sam3x8e.yaml",
 }
 
-# Load address ranges used to pick the matching chip description for a firmware.
+# Fallback for images that board.yaml does not declare (hand-written firmware such
+# as the FP acceptance test): the lowest PT_LOAD physical address identifies the
+# part.  The ranges can collide across families -- the STM32F411 and the STM32F767
+# both run from 0x08000000 -- which is exactly why board.yaml wins when it knows.
 CHIP_BY_LOAD_ADDRESS = (
     (0x08000000, 0x08100000, "stm32f411"),
     (0x00080000, 0x00100000, "sam3x8e"),
@@ -35,6 +43,22 @@ CHIP_BY_LOAD_ADDRESS = (
 HAS_SOCAT = shutil.which("socat") is not None
 
 requires_socat = pytest.mark.skipif(not HAS_SOCAT, reason="socat is required by the SAM UART/SPI models")
+
+UNSET = object()
+
+
+def declared_chips() -> Dict[str, Optional[str]]:
+    """``{output directory: chip name}`` from ``tests/firmware/board.yaml``.
+
+    A board whose ``chip`` is empty builds an image that no chip description can
+    run yet; the value is ``None`` so the caller can tell "declared, not runnable"
+    from "not declared at all".
+    """
+    if not FIRMWARE_CONFIG.is_file():
+        return {}
+    with open(FIRMWARE_CONFIG, encoding="utf-8") as file:
+        document = yaml.safe_load(file) or {}
+    return {board["output"]: board.get("chip") for board in document.get("boards", [])}
 
 
 def elf_load_address(path: Path) -> int:
@@ -54,12 +78,22 @@ def elf_load_address(path: Path) -> int:
     return min(bases)
 
 
-def chip_for_firmware(path: Path) -> str:
-    base = elf_load_address(path)
+DECLARED_CHIPS = declared_chips()
+
+
+def chip_for_firmware(path: Path) -> Optional[str]:
+    """The chip description a firmware is run against, or None if there is none."""
+    declared = DECLARED_CHIPS.get(path.parent.name, UNSET)
+    if declared is not UNSET:
+        return declared
+    try:
+        base = elf_load_address(path)
+    except (ValueError, struct.error):
+        return None
     for low, high, name in CHIP_BY_LOAD_ADDRESS:
         if low <= base < high:
             return name
-    raise ValueError(f"no chip description matches load address 0x{base:08x} of {path.name}")
+    return None
 
 
 def iter_firmware_files():
@@ -68,14 +102,13 @@ def iter_firmware_files():
             yield from sorted(directory.rglob("*.elf"))
 
 
-def discover_firmwares():
-    """Return [(firmware_path, chip_name)] for every test firmware we can find."""
-    found = []
+def discover_firmwares() -> list:
+    """Return [(firmware_path, chip_name)] for every test firmware we can run."""
+    found: list = []
     for path in iter_firmware_files():
-        try:
-            found.append((path, chip_for_firmware(path)))
-        except ValueError:
-            continue
+        chip = chip_for_firmware(path)
+        if chip:
+            found.append((path, chip))
     return found
 
 
