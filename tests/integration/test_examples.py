@@ -25,6 +25,7 @@ EXAMPLES = {
     "fpu": "values held in s0-s3",
     "devices": "JEDEC ID",
     "unclaimed_io": "unclaimed address(es)",
+    "tft": "frame digest",
 }
 
 

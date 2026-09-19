@@ -5,6 +5,13 @@ FROM python:3.12
 # image rebuilds to the same cores; bump both together.
 ARG ARDUINO_CLI_VERSION=1.5.1
 ARG STM32_CORE_VERSION=3.0.0
+# The TFT shield's firmware is built against Adafruit's libraries, pinned here for the
+# same reason the cores are: an image that rebuilds to different code is not a
+# reproducible acceptance test.  `--no-deps` keeps the extras the library metadata
+# drags in (touch controllers this board does not have) out of the image.
+ARG ADAFRUIT_BUSIO_VERSION=1.17.4
+ARG ADAFRUIT_GFX_VERSION=1.12.6
+ARG ADAFRUIT_ILI9341_VERSION=1.6.0
 
 # update
 RUN apt-get update && apt-get -yq dist-upgrade \
@@ -55,7 +62,11 @@ RUN arduino-cli config init --overwrite \
     && arduino-cli core install arduino:sam \
     && arduino-cli core install arduino:samd \
     && arduino-cli core install "STMicroelectronics:stm32@${STM32_CORE_VERSION}" \
+    && arduino-cli lib install --no-deps "Adafruit BusIO@${ADAFRUIT_BUSIO_VERSION}" \
+    && arduino-cli lib install --no-deps "Adafruit GFX Library@${ADAFRUIT_GFX_VERSION}" \
+    && arduino-cli lib install --no-deps "Adafruit ILI9341@${ADAFRUIT_ILI9341_VERSION}" \
     && arduino-cli core list \
+    && arduino-cli lib list \
     && rm -rf /home/onelife/.arduino15/staging/*
 
 CMD [ "bash" ]

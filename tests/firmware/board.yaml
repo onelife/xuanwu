@@ -29,6 +29,29 @@ boards:
     sketch: Blink_uart_m3
     output: sam3x8e
 
+  - name: due_tft
+    board: Arduino Due (Programming Port) + Adafruit 2.8" TFT Touch Shield v2
+    fqbn: arduino:sam:arduino_due_x_dbg
+    chip: sam3x8e_tft
+    note: >-
+      Adafruit's graphicstest, which is the first milestone of the TFT work: it
+      needs SPI, the chip-select fan-out (the shield has the panel on D10 and the
+      microSD on D4) and the ILI9341 model.  The library version is pinned in
+      docker/Dockerfile.  It draws megabytes of pixels, so it runs as a `milestone`
+      test rather than on every change.
+    sketch: graphicstest_due_tft
+    output: due_tft
+
+  - name: due_tft_smoke
+    board: Arduino Due (Programming Port) + Adafruit 2.8" TFT Touch Shield v2
+    fqbn: arduino:sam:arduino_due_x_dbg
+    chip: sam3x8e_tft
+    note: >-
+      The same libraries on a handful of known shapes, so the drawing path can be
+      checked pixel by pixel in a test that finishes in a second or two.
+    sketch: Tft_smoke_m3
+    output: due_tft_smoke
+
   - name: mkrzero
     board: Arduino MKR Zero
     fqbn: arduino:samd:mkrzero
