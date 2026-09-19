@@ -7,7 +7,11 @@ These cover the two defects that used to kill the whole stub:
   * any packet the stub does not implement returned None into the encoder
 """
 
+import os
+import shutil
 import socket
+import subprocess
+import tempfile
 import threading
 import time
 
@@ -19,6 +23,8 @@ pytestmark = pytest.mark.integration
 
 # Scratch RAM in the STM32F411 memory map (top of the 128 KiB SRAM).
 SCRATCH = 0x2001F000
+
+GDB = shutil.which("gdb-multiarch")
 
 
 def free_port() -> int:
@@ -56,14 +62,8 @@ def body_of(reply: bytes) -> bytes:
     return b"" if decoded is None else decoded
 
 
-@pytest.fixture(scope="module")
-def stub(stm32f411_path, stm32f411_firmware):
-    """Run a GDB stub for the STM32F411 firmware on a private port."""
-    from xuanwu import XuanWu
-
-    port = free_port()
-    device = XuanWu(str(stm32f411_path), str(stm32f411_firmware), rsp=port)
-    device.reset()
+def start_stub(device, port: int, keep: bool = True):
+    """Serve ``device`` on ``port`` and wait until it accepts connections."""
     errors = []
 
     def serve():
@@ -84,9 +84,40 @@ def stub(stm32f411_path, stm32f411_firmware):
     else:
         pytest.fail("GDB stub did not start listening")
 
+    if not keep:
+        # The stub serves one connection at a time, so a client such as GDB has
+        # to be the only one.
+        connection.close()
+        return None, errors
+    return connection, errors
+
+
+@pytest.fixture(scope="module")
+def stub(stm32f411_path, stm32f411_firmware):
+    """Run a GDB stub for the STM32F411 firmware on a private port."""
+    from xuanwu import XuanWu
+
+    port = free_port()
+    device = XuanWu(str(stm32f411_path), str(stm32f411_firmware), rsp=port)
+    device.reset()
+    connection, errors = start_stub(device, port)
+
     yield connection, errors, device
 
     connection.close()
+
+
+@pytest.fixture(scope="module")
+def gdb_stub(stm32f411_path, stm32f411_firmware):
+    """A stub of its own, left free for the real GDB to connect to."""
+    from xuanwu import XuanWu
+
+    port = free_port()
+    device = XuanWu(str(stm32f411_path), str(stm32f411_firmware), rsp=port)
+    device.reset()
+    _connection, errors = start_stub(device, port, keep=False)
+
+    return device, errors, port
 
 
 class TestStubSurvivesUnsupportedPackets:
@@ -111,9 +142,23 @@ class TestStubSurvivesUnsupportedPackets:
         connection, _errors, _device = stub
         send(connection, "g")
         body = body_of(recv_packet(connection))
-        # 17 registers (r0-r12, sp, lr, pc, xpsr) x 4 bytes x 2 hex chars
-        assert len(body) == 17 * 4 * 2
+        # 17 core registers (r0-r12, sp, lr, pc, xpsr) x 4 bytes x 2 hex chars,
+        # then d0-d15 (8 bytes each) and fpscr because this core has an FPU.
+        assert len(body) == (17 * 4 + 16 * 8 + 4) * 2
         assert all(c in b"0123456789abcdef" for c in body)
+
+    def test_the_target_description_carries_the_fp_register_file(self, stub):
+        connection, _errors, _device = stub
+        send(connection, "qXfer:features:read:target.xml:0,fff")
+        body = body_of(recv_packet(connection))
+        assert b'<feature name="org.gnu.gdb.arm.m-profile">' in body
+        assert b'<feature name="org.gnu.gdb.arm.vfp">' in body
+
+    def test_a_floating_point_register_can_be_read_by_number(self, stub):
+        connection, _errors, device = stub
+        device.reg.write("d0", 0x0123_4567_89AB_CDEF)
+        send(connection, "p1a")  # d0 is register 26
+        assert body_of(recv_packet(connection)) == b"efcdab8967452301"
 
     def test_qxfer_for_an_unknown_object_reports_unsupported(self, stub):
         connection, _errors, _device = stub
@@ -179,3 +224,50 @@ class TestStubControl:
         assert body_of(recv_packet(connection)) == b"OK"
         send(connection, "m%08x,4" % SCRATCH)
         assert body_of(recv_packet(connection)) == b"01020304"
+
+
+@pytest.mark.skipif(GDB is None, reason="gdb-multiarch is not installed")
+class TestWithRealGdb:
+    """The register layout is only really verified by a debugger that uses it."""
+
+    def run_gdb(self, port: int, firmware) -> str:
+        commands = "\n".join(
+            [
+                "set pagination off",
+                "set confirm off",
+                f"file {firmware}",
+                f"target remote 127.0.0.1:{port}",
+                "info registers pc xpsr",
+                "info registers d0 d15 fpscr",
+                "p/x $d0",
+                "quit",
+            ]
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".gdb", delete=False) as handle:
+            handle.write(commands + "\n")
+            script = handle.name
+        try:
+            result = subprocess.run(
+                [GDB, "-q", "-batch", "-x", script], capture_output=True, text=True, timeout=120
+            )
+        finally:
+            os.unlink(script)
+        return result.stdout + result.stderr
+
+    def test_gdb_reads_the_floating_point_registers(self, gdb_stub, stm32f411_firmware):
+        device, errors, port = gdb_stub
+        device.reg.write("s0", 0x3FC0_0000)  # 1.5f, the low half of d0
+        device.reg.write("s1", 0x4040_0000)  # 3.0f, the high half
+
+        output = self.run_gdb(port, stm32f411_firmware)
+        compact = output.replace(" ", "").lower()
+
+        # A wrong or missing description makes GDB fall back to its own default
+        # register set and complain about the 'g' packet.
+        assert "Truncated register" not in output, output
+        assert "Remote 'g' packet" not in output, output
+        assert "d0" in output and "fpscr" in output, output
+        assert "0x404000003fc00000" in compact, output
+        # The ELF was loaded and symbolised, so the connection really is live.
+        assert "<Reset_Handler>" in output, output
+        assert errors == []

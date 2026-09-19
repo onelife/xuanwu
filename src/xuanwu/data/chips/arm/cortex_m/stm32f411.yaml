@@ -54,6 +54,10 @@ chip:
         type: core
         base: 0xE000ED88
         size: 0x4
+    - FPU:  # floating-point extension: FPCCR/FPCAR/FPDSCR/MVFR0-2 (Cortex-M4F)
+        type: core
+        base: 0xE000EF30
+        size: 0x1C
     - DBG:  # debug system
         type: core
         base: 0xE000EDF0

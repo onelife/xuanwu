@@ -13,6 +13,7 @@ from struct import Struct
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 from unicorn import Uc
+from unicorn import arm_const as uc_arm
 from unicorn.arm_const import *
 
 from ..config import logger
@@ -57,10 +58,15 @@ arm_core_registers = {
     "basepri": UC_ARM_REG_BASEPRI,  # base priority mask
     # ?
     "control": UC_ARM_REG_CONTROL,  # special-purpose control register
-    # FP extension
-    # S0-31, D0-15
+    # FP extension: S0-S31 alias D0-D15 which alias Q0-Q15
     "fpscr": UC_ARM_REG_FPSCR,
 }
+
+# Added in a loop because the names are numbered; the FP register file is part of
+# the CPU model, so it is always accessible even on a core without an FPU.
+arm_core_registers.update({f"s{index}": getattr(uc_arm, f"UC_ARM_REG_S{index}") for index in range(32)})
+arm_core_registers.update({f"d{index}": getattr(uc_arm, f"UC_ARM_REG_D{index}") for index in range(16)})
+arm_core_registers.update({f"q{index}": getattr(uc_arm, f"UC_ARM_REG_Q{index}") for index in range(16)})
 
 
 arm_context_registers = ["r0", "r1", "r2", "r3", "r12", "lr", "pc", "xpsr"]

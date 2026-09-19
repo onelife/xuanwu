@@ -127,3 +127,7 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Build output of the floating-point acceptance firmware; the ELF is committed
+# so the test suite needs no Arm toolchain, but the linker map is not.
+tests/firmware/stm32f411/fpu_test/fpu_test.map

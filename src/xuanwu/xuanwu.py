@@ -127,10 +127,17 @@ class XuanWu(object):
         self._loader.load(self.mem)
         # gdb rsp
         if rsp:
+            # A core peripheral named "fpu" tells the debugger to describe the
+            # floating-point register file as well.
+            fpu = "fpu" in self.hw.perif
             if isinstance(rsp, bool):
-                self.rsp = RemoteSerialProtocol(self.box, self.mem, self.reg, self._arch[0], self._mode[0])
+                self.rsp = RemoteSerialProtocol(
+                    self.box, self.mem, self.reg, self._arch[0], self._mode[0], fpu=fpu
+                )
             else:
-                self.rsp = RemoteSerialProtocol(self.box, self.mem, self.reg, self._arch[0], self._mode[0], rsp)
+                self.rsp = RemoteSerialProtocol(
+                    self.box, self.mem, self.reg, self._arch[0], self._mode[0], rsp, fpu=fpu
+                )
         else:
             self.rsp = None
 

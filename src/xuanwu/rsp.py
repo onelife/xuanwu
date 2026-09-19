@@ -3,7 +3,7 @@
 import re
 import socket
 from os import path
-from typing import Optional, Any, Union
+from typing import Optional, Any, Union, List
 
 from unicorn import Uc, UC_ARCH_ARM, UC_MODE_MCLASS, UC_HOOK_CODE, UC_HOOK_MEM_WRITE, UC_HOOK_MEM_READ
 
@@ -33,7 +33,7 @@ class RemoteSerialProtocol(object):
 
     def __init__(
         self, box: Uc, mem: MemoryController, reg: RegisterController, arch: int, mode: int,
-        port: int = 6666, **kwargs: Any
+        port: int = 6666, fpu: bool = False, **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
         self._box = box
@@ -44,8 +44,9 @@ class RemoteSerialProtocol(object):
         self._reg = reg
         self.host = "127.0.0.1"
         self.port = port
-        self.reg_info = self.get_register_info(arch, mode)
-        self.target_xml = self.get_target_xml(arch, mode)
+        self.fpu = fpu
+        self.reg_info = self.get_register_info(arch, mode, fpu)
+        self.target_xml = self.get_target_xml(arch, mode, fpu)
         self.bp = set()
         self.mw = dict()
         self.mr = set()
@@ -54,38 +55,60 @@ class RemoteSerialProtocol(object):
         self.kill = False
 
     @staticmethod
-    def _profile_path(arch: int, mode: int) -> str:
-        """Locate the GDB target description for this architecture/mode."""
+    def _profile_paths(arch: int, mode: int, fpu: bool = False) -> List[str]:
+        """Locate the GDB target descriptions for this architecture/mode.
+
+        A core with an FPU reports a second feature: the floating-point register
+        file.  GDB reads the register set as the concatenation of the documents
+        named by the target description and numbers the registers in that order,
+        which is why the FP feature has to come last.
+        """
         arch_ = mode_ = ""
+        extra: List[str] = []
         if arch == UC_ARCH_ARM:
             arch_ = "arm"
             if mode & UC_MODE_MCLASS:
                 mode_ = "arm-m-profile.xml"
+                if fpu:
+                    # what a Cortex-M4F reports: d0-d15 and fpscr
+                    extra.append("arm-vfpv2.xml")
 
-        profile = path.join(RESOURCE["gdb"], arch_, mode_)
-        if not path.exists(profile):
-            raise XwInvalidChipInformation(f"Unsupported architecture: {arch =}, {mode =}, {profile =}")
-        return profile
+        profiles = [path.join(RESOURCE["gdb"], arch_, name) for name in [mode_, *extra]]
+        for profile in profiles:
+            if not path.exists(profile):
+                raise XwInvalidChipInformation(f"Unsupported architecture: {arch =}, {mode =}, {profile =}")
+        return profiles
 
     @classmethod
-    def get_register_info(cls, arch: int, mode: int):
+    def get_register_info(cls, arch: int, mode: int, fpu: bool = False):
         import xml.etree.ElementTree as ET
 
-        root = ET.parse(cls._profile_path(arch, mode)).getroot()
-        return {reg.attrib["name"]: (int(reg.attrib["regnum"]) if "regnum" in reg.attrib else idx, int(reg.attrib["bitsize"]) // 8) for idx, reg in enumerate(root.findall("reg"))}
+        info = {}
+        # An explicit ``regnum`` only pushes the implicit counter forward, which
+        # is exactly how GDB numbers the registers of a target description.
+        next_num = 0
+        for profile in cls._profile_paths(arch, mode, fpu):
+            root = ET.parse(profile).getroot()
+            for reg in root.findall("reg"):
+                num = int(reg.attrib["regnum"]) if "regnum" in reg.attrib else next_num
+                info[reg.attrib["name"]] = (num, int(reg.attrib["bitsize"]) // 8)
+                next_num = num + 1
+        return info
 
     @classmethod
-    def get_target_xml(cls, arch: int, mode: int) -> str:
+    def get_target_xml(cls, arch: int, mode: int, fpu: bool = False) -> str:
         """Target description served through ``qXfer:features:read``.
 
         GDB requires a ``<target>`` document; serving the bare ``<feature>``
         element from the binutils file makes GDB silently ignore it and fall back
         to its default (much larger) register set.
         """
-        with open(cls._profile_path(arch, mode), encoding="utf-8") as file:
-            text = file.read()
-        feature = text[text.index("<feature") :].rstrip()
-        indented = "\n".join("  " + line for line in feature.splitlines())
+        features = []
+        for profile in cls._profile_paths(arch, mode, fpu):
+            with open(profile, encoding="utf-8") as file:
+                text = file.read()
+            features.append(text[text.index("<feature") :].rstrip())
+        indented = "\n".join("  " + line for line in "\n".join(features).splitlines())
         return (
             '<?xml version="1.0"?>\n'
             '<!DOCTYPE target SYSTEM "gdb-target.dtd">\n'

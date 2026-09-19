@@ -18,6 +18,10 @@ from .constants import CCR, CFSR, CONTROL, EPSR, Exception_
 __all__ = ["ArmHardwareController"]
 
 
+FP_FRAME_SIZE = 0x68
+"""Basic frame (0x20) plus the 18-word floating-point frame (S0-S15, FPSCR, reserved)."""
+
+
 class ArmHardwareController(object):
     """Armv7-m hardware control unit"""
 
@@ -71,11 +75,11 @@ class ArmHardwareController(object):
     def push_context(self, exception: int) -> None:
         control = self._reg.read("control")
         # if HaveFPExt() && CONTROL.FPCA == '1' then
-        # if control & (1 << CONTROL.FPCA) and False:
-        #     frame_size = 0x68
-        #     force_align = True
-        # else:
-        frame_size = 0x20
+        # The FP extension stacks an extra frame below the integer one whenever
+        # the interrupted context had used the FPU.  Unicorn sets CONTROL.FPCA
+        # by itself when a VFP instruction executes, so this mirrors hardware.
+        fp_frame = bool(control & (1 << CONTROL.FPCA))
+        frame_size = FP_FRAME_SIZE if fp_frame else 0x20
         ccr = self.perif["scb"].read_register("CCR")
         force_align = ccr & (1 << CCR.STKALIGN)
         if force_align:
@@ -95,6 +99,13 @@ class ArmHardwareController(object):
             self._reg.write("msp", sp)
             # logger.debug(f"push_context: m{sp = :08x}")
 
+        if fp_frame:
+            # The FP frame is stacked *below* the integer frame, so it is written
+            # first and the integer words start above it.  Getting this wrong
+            # makes the exception return land on garbage.
+            self._push_fp_context(sp)
+            sp += FP_FRAME_SIZE - 0x20
+
         for i in range(8):
             reg = arm_context_registers[i]
             val = self._reg.read(reg)
@@ -105,8 +116,6 @@ class ArmHardwareController(object):
                 # logger.debug(f"push_context: {reg} = {val:08x}")
             self._mem.write(sp, self.format_.pack(val))
             sp += 4
-
-        # TODO: if HaveFPExt() && CONTROL.FPCA == '1' then
 
         if self._thread_mode:
             if control & (1 << CONTROL.SPSEL):
@@ -121,14 +130,41 @@ class ArmHardwareController(object):
             # Return to Handler mode, exception return uses non-floating-point state from the MSP and
             # execution uses MSP after return.
             exc_return = 0xFFFFFFF1
+        if fp_frame:
+            # bit 4 clear means "an FP frame was stacked"
+            exc_return &= ~0x10
         # logger.debug(f"EXP_{exception} {exc_return = :08x}")
         self._reg.write("lr", exc_return)
 
+    def _push_fp_context(self, sp: int) -> None:
+        """Stack S0-S15, FPSCR and the reserved word, lowest address first."""
+        for index in range(16):
+            self._mem.write(sp, self.format_.pack(self._reg.read(f"s{index}")))
+            sp += 4
+        self._mem.write(sp, self.format_.pack(self._reg.read("fpscr")))
+        sp += 4
+        self._mem.write(sp, self.format_.pack(0))  # reserved
+
+    def _pop_fp_context(self, sp: int) -> None:
+        """Restore the frame written by :meth:`_push_fp_context`."""
+        for index in range(16):
+            value = self.format_.unpack(self._mem.read(sp, 4))[0]
+            self._reg.write(f"s{index}", value)
+            sp += 4
+        self._reg.write("fpscr", self.format_.unpack(self._mem.read(sp, 4))[0])
+        # the reserved word that follows is discarded
+
     def pop_context(self, sp: int, exc_return: int) -> None:
-        # TODO: if HaveFPExt() && EXC_RETURN<4> == '0' then
-        frame_size = 0x20
+        # bit 4 clear means the exception stacked an FP frame as well
+        fp_frame = not (exc_return & 0x10)
+        frame_size = FP_FRAME_SIZE if fp_frame else 0x20
         ccr = self.perif["scb"].read_register("CCR")
         force_align = ccr & (1 << CCR.STKALIGN)
+
+        if fp_frame:
+            # the FP frame sits below the integer one, so consume it first
+            self._pop_fp_context(sp)
+            sp += FP_FRAME_SIZE - 0x20
 
         psr = 0
         for i in range(8):
@@ -256,12 +292,16 @@ class ArmHardwareController(object):
     def system_interrupt_callback(self, box: Uc, intno: int, data: Any):
         if intno == EXCP.EXCEPTION_EXIT:
             if self._thread_mode:
-                logger.error(f"Return from ISR but in thread mode!?")
-                raise RuntimeError(f"Return from ISR but in thread mode!?")
+                logger.error("Return from ISR but in thread mode!?")
+                raise RuntimeError("Return from ISR but in thread mode!?")
             pc = self._reg.pc_t
             # logger.debug(f"pc = {pc:08x}")
             # TODO: if HaveFPExt() then
-            if (pc & 0x0FFFFFF0) != 0x0FFFFFF0:
+            # EXC_RETURN is valid when bits 31:5 are all ones and bits 3:0 select
+            # the return mode.  Bit 4 must NOT be masked off here: it says whether
+            # an FP frame was stacked (0xFFFFFFE1/E9/ED vs 0xFFFFFFF1/F9/FD), and
+            # requiring it to be 1 rejected every floating-point return.
+            if (pc & 0xFFFFFFE0) != 0xFFFFFFE0 or (pc & 0xF) not in (0x1, 0x9, 0xD):
                 raise RuntimeError("UNPREDICTABLE")
             exp = self._reg.read("ipsr")
             # logger.debug(f"system_interrupt_callback: {exp =}, {self._irq_handling =}, {self._irq_pending =}")

@@ -39,7 +39,7 @@ def test_new_module_paths_expose_the_expected_registries():
     assert ArmHardwareBase is not None and Register is not None
     assert "r0" in arm_core_registers
     assert ArmHardwareController is not None
-    assert set(CORE_PERIPHERALS) == {"scid", "systick", "nvic", "scb", "cp", "dbg", "dwt"}
+    assert set(CORE_PERIPHERALS) == {"scid", "systick", "nvic", "scb", "cp", "dbg", "dwt", "fpu"}
     assert set(ATMEL_BUILDIN) == {"pmc", "dma", "gpio", "adc", "pwm", "uart", "spi", "uotghs"}
     assert set(ST_BUILDIN) == {"rcc", "gpio"}
 
