@@ -59,6 +59,7 @@ class XuanWu(object):
         code: str,
         rsp: Union[bool, int] = False,
         hardware_options: Optional[Dict[str, Any]] = None,
+        semihosting: Any = True,
         **kwargs: Any,
     ) -> None:
         """
@@ -67,6 +68,9 @@ class XuanWu(object):
         :param rsp: ``True``, or a TCP port, to start the GDB remote stub
         :param hardware_options: per-peripheral option overrides applied to every
             ``core`` peripheral, e.g. ``{"bridge": "loopback", "baudrate": 9600}``
+        :param semihosting: ``True`` (default) services ``BKPT 0xAB`` traps,
+            ``False`` leaves them to the debugger, or pass a
+            :class:`~xuanwu.backends.SemiHosting` instance to capture its output
         """
         super().__init__(**kwargs)
         # load chip info (accepts a path or a bundled chip name)
@@ -104,7 +108,9 @@ class XuanWu(object):
         if self._arch[0] == UC_ARCH_ARM:
             from .arch import ArmHardwareController
 
-            self.hw = ArmHardwareController(self.box, self.reg, self.mem, options=hardware_options)
+            self.hw = ArmHardwareController(
+                self.box, self.reg, self.mem, options=hardware_options, semihosting=semihosting
+            )
         if self.hw is None:
             raise XwInvalidParameter(f"Unknown architecture {arch}")
         self.dev = DeviceController()
@@ -112,6 +118,8 @@ class XuanWu(object):
         self.mem.map_memory(self._chip)
         # map memory for peripherals
         self.hw.map_memory(self._chip)
+        # attach the external devices the chip description declares
+        self.dev.load(self._chip, self.box, self.reg, self.mem, self.hw)
         # create program loader
         if not path.exists(code):
             raise XwInvalidParameter(f"Invalid code path: {code}")
@@ -180,11 +188,19 @@ class XuanWu(object):
                 print(f"[M] {inst.reg_name(reg)} = 0x{self.reg.read(reg):08x}")
 
     def run(self, until: Optional[int] = 0x0, count: Optional[int] = 0):
+        """Execute ``count`` instructions, or until the PC reaches ``until``.
+
+        ``count=0`` means "no limit"; ``until=0`` means "no stop address".  Both
+        limits handed to Unicorn are keywords on purpose: ``uc_emu_start`` takes
+        ``(begin, until, timeout, count)``, and passing the instruction budget as
+        the third positional argument silently turned it into a millisecond
+        timeout.
+        """
         from unicorn import UcError, UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED, UC_ERR_INSN_INVALID, UC_ERR_FETCH_UNMAPPED
 
         try:
             if not self.rsp:
-                self.box.emu_start(self.reg.pc_t, until, count)
+                self.box.emu_start(self.reg.pc_t, until, 0, count)
             else:
                 self.rsp.run()
         except UcError as err:
@@ -202,6 +218,7 @@ class XuanWu(object):
 
     def reset(self) -> None:
         self.hw.reset()
+        self.dev.reset()
         # TODO: B1.5.5
         self.reg.write("lr", 0xFFFFFFFF)
         # select and initialize msp

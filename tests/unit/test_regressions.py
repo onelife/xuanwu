@@ -90,6 +90,61 @@ class TestScbResetValues:
         assert box.hw.perif["scb"].read_register("CPUID") == 0x410FC240
 
 
+class TestProgramCounterWritesKeepThumbState:
+    """Writing an even PC dropped Unicorn into Arm state.
+
+    The next fetch then failed with ``UC_ERR_INSN_INVALID``.  It was found
+    through the semihosting trap, which steps the PC over the ``BKPT`` by hand.
+    """
+
+    CODE = 0x2001_F000
+
+    @pytest.fixture
+    def device(self, stm32f411_path, stm32f411_firmware):
+        from xuanwu import XuanWu
+
+        device = XuanWu(str(stm32f411_path), str(stm32f411_firmware))
+        device.reset()
+        return device
+
+    def test_pc_t_keeps_the_instruction_set_bit(self, device):
+        from unicorn import arm_const as uc_arm
+
+        device.reg.pc_t = 0x2000_0000
+        assert device.reg.pc == 0x2000_0000
+        assert device.reg.read(uc_arm.UC_ARM_REG_CPSR) & 0x20, "the core left Thumb state"
+
+    def test_the_core_keeps_fetching_after_a_pc_t_write(self, device):
+        device.mem.write(self.CODE, bytes.fromhex("00bf" "00bf" "00bf" "fee7"))  # nop x3, b .
+        device.reg.pc_t = self.CODE
+
+        device.run(count=4)  # must not raise UC_ERR_INSN_INVALID
+        assert device.reg.pc == self.CODE + 6
+
+
+class TestRunHonoursTheInstructionBudget:
+    """``run(count=N)`` used to pass N to Unicorn as a *timeout* in milliseconds."""
+
+    CODE = 0x2001_F000
+
+    @pytest.fixture
+    def device(self, stm32f411_path, stm32f411_firmware):
+        from xuanwu import XuanWu
+
+        device = XuanWu(str(stm32f411_path), str(stm32f411_firmware))
+        device.reset()
+        return device
+
+    def test_count_stops_after_exactly_that_many_instructions(self, device):
+        device.mem.write(self.CODE, bytes.fromhex("00bf" "00bf" "00bf" "fee7"))  # nop x3, b .
+        device.reg.pc_t = self.CODE
+
+        device.run(count=1)
+        assert device.reg.pc == self.CODE + 2
+        device.run(count=2)
+        assert device.reg.pc == self.CODE + 6
+
+
 class TestErrorMessagesInterpolate:
     """Several raise sites were missing the f prefix, printing literal {name}."""
 

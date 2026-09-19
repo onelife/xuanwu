@@ -39,6 +39,34 @@ class MemoryController(object):
         self._word = "Q" if is_64bit else "I"
         self._registry: List[MemoryInfo] = []
         self._io_registry: List[MemoryIoInfo] = []
+        self._unclaimed: Dict[Tuple[int, int], int] = {}
+
+    # -- unclaimed MMIO -------------------------------------------------
+
+    def _record_unclaimed(self, address: int, size: int) -> None:
+        """Remember an MMIO access that no peripheral model claimed."""
+        key = (address, size)
+        self._unclaimed[key] = self._unclaimed.get(key, 0) + 1
+
+    def unclaimed_accesses(self) -> List[Tuple[int, int, int]]:
+        """Accesses that fell through to the raw window buffer, as (address, size, count).
+
+        This is the "what have I not modelled yet" report: booting a new firmware
+        and reading it tells you which peripheral registers are worth
+        implementing next.
+        """
+        return sorted((address, size, count) for (address, size), count in self._unclaimed.items())
+
+    def show_unclaimed(self) -> None:
+        """Print :meth:`unclaimed_accesses` as a table."""
+        records = self.unclaimed_accesses()
+        print(f'\n{"Address":10s}   {"Size":5s}   {"Count":8s}')
+        if not records:
+            print("(every MMIO access so far was claimed by a peripheral model)")
+            return
+        for address, size, count in records:
+            print(f"0x{address:08x}   {size:<5d}   {count:<8d}")
+        print(f"{len(records)} unclaimed address(es)")
 
     def get_map(self, start: int, end: int, no_buf_only: Optional[bool] = False) -> List[MemoryInfo]:
         ret = []
@@ -209,6 +237,7 @@ class MemoryController(object):
             logger.debug(f"records: {records}")
             raise XwInvalidMemoryAddress(f"Invalid memory IO address to read: 0x{base + offset:08X} ({size})")
         if not records:
+            self._record_unclaimed(base + offset, size)
             logger.warning(f"Unmapped memory IO address to read: 0x{base + offset:08X} ({size})")
             return int.from_bytes(buffer[offset : offset + size], self._endian_str)
         else:
@@ -223,6 +252,7 @@ class MemoryController(object):
         if len(records) > 1:
             raise XwInvalidMemoryAddress(f"Invalid memory IO address to write: 0x{base + offset:08X} ({size})")
         if not records:
+            self._record_unclaimed(base + offset, size)
             logger.warning(f"Unmapped memory IO address to write: 0x{base + offset:08X} ({size})")
             value = Struct(f"<{self.size2fmt[size]}").pack(data)
             buffer[:] = buffer[:offset] + value + buffer[offset + size :]
@@ -248,6 +278,7 @@ class MemoryController(object):
         if len(records) > 1:
             raise XwInvalidMemoryAddress(f"Invalid bitband (R): 0x{base + offset:08X} ({size})")
         if not records:
+            self._record_unclaimed(base + offset, size)
             data = int.from_bytes(buffer[offset : offset + size], self._endian_str)
             logger.warning(
                 f"Unmapped bitband (R): 0x{base + offset:08X}{f' ({size})' if size != 4 else ''} => 0x{data:08x}"
@@ -278,6 +309,7 @@ class MemoryController(object):
         if len(records) > 1:
             raise XwInvalidMemoryAddress(f"Invalid bitband address to write: 0x{base + offset:08X} ({size})")
         if not records:
+            self._record_unclaimed(base + offset, size)
             logger.warning(
                 f"Unmapped bitband (W): 0x{base + offset:08X}{f' ({size})' if size != 4 else ''} <= 0x{data:08x}"
             )

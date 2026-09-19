@@ -40,6 +40,16 @@ class RegisterController(object):
     def pc_t(self):
         return self.pc | self._t_mode
 
+    @pc_t.setter
+    def pc_t(self, value: int) -> None:
+        """Write the PC keeping the instruction-set bit that Cortex-M requires.
+
+        Unicorn switches to Arm state when the PC is written with bit 0 clear,
+        which makes the very next fetch fail with ``UC_ERR_INSN_INVALID``.  On
+        Cortex-M that bit is not part of the address, so it is forced on here.
+        """
+        self.write("pc", value | self._t_mode)
+
     def write(self, register: Union[str, int], value: int) -> None:
         if isinstance(register, str):
             register = self._str2num[register.lower()]

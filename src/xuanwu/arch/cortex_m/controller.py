@@ -11,6 +11,7 @@ from ...config import EXCP, logger
 from ...exception import XwUnknownHardware
 from ...register import RegisterController
 from ...memory import MemoryController
+from ...backends.semihost import SEMIHOST_BKPT, SemiHosting
 from ..base import IrqOp, arm_context_registers
 from .constants import CCR, CFSR, CONTROL, EPSR, Exception_
 
@@ -26,6 +27,7 @@ class ArmHardwareController(object):
         reg: RegisterController,
         mem: MemoryController,
         options: Optional[Dict[str, Any]] = None,
+        semihosting: Union[bool, SemiHosting, None] = True,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -33,6 +35,9 @@ class ArmHardwareController(object):
         self._reg = reg
         self._mem = mem
         self._options = dict(options or {})
+        # ``True`` builds a default service; pass an instance to capture its
+        # output, or ``False``/``None`` to leave BKPT 0xAB unhandled.
+        self._semihost = SemiHosting() if semihosting is True else (semihosting or None)
         self._thread_mode = True
         self.format_ = Struct("<I")
         self.perif: Dict[str, object] = {}
@@ -238,6 +243,16 @@ class ArmHardwareController(object):
         logger.warning(f"UsageFault: {exc_return = :08x}")
         self.jump_isr(Exception_.UsageFault - 16)
 
+    def is_semihost_call(self) -> bool:
+        """True when the instruction at the PC is the semihosting trap ``BKPT 0xAB``."""
+        address = self._reg.pc & ~0x1
+        try:
+            halfword = int.from_bytes(self._mem.read(address, 2), "little")
+        except Exception as err:  # noqa: BLE001 - an unmapped PC means "not a trap"
+            logger.debug(f"Cannot read the instruction at 0x{address:08x}: {err}")
+            return False
+        return halfword == SEMIHOST_BKPT
+
     def system_interrupt_callback(self, box: Uc, intno: int, data: Any):
         if intno == EXCP.EXCEPTION_EXIT:
             if self._thread_mode:
@@ -318,6 +333,16 @@ class ArmHardwareController(object):
             if not self._thread_mode and exp == 0:
                 self.push_context(Exception_.UsageFault)
                 return self.trigger_usage_fault(pc)
+
+        elif intno == EXCP.BKPT and self._semihost is not None and self.is_semihost_call():
+            # Unicorn implements QEMU's ARM semihosting but does not expose the
+            # switch that enables it, so it reports BKPT 0xAB as an ordinary
+            # BKPT and leaves the PC on the instruction.  Recognise the trap
+            # here, service it, and step over it ourselves.
+            self._semihost.handle(box, self._mem, self._reg)
+            # ``pc_t`` keeps bit 0 set: a plain PC write would drop the core into
+            # Arm state and the next fetch would be an invalid instruction.
+            self._reg.pc_t = (self._reg.pc & ~0x1) + 2
 
         else:
             pc = self._reg.pc_t

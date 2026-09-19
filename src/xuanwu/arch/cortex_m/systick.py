@@ -2,7 +2,7 @@
 
 """SysTick system timer."""
 
-from typing import Any, Optional
+from typing import Any
 
 from unicorn import Uc
 
