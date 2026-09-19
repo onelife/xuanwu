@@ -1,2 +1,8 @@
 # Development / test dependencies (not needed to run the simulator).
 pytest ~= 8.0
+pyflakes ~= 3.2
+
+# Building the package: the test suite runs `setup.py` and `pip wheel` directly, so
+# these have to be present rather than only inside pip's isolated build environment.
+setuptools >= 68
+wheel

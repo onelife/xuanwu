@@ -1,0 +1,16 @@
+# The repository is developed on Windows and tested in a Linux container, so the
+# two sides have to agree on line endings -- otherwise every checkout from one
+# side shows up as a whole-file diff on the other.
+* text=auto eol=lf
+
+# Test firmware images and other artefacts: never translate these.
+*.bin binary
+*.elf binary
+*.hex binary
+*.a binary
+*.pdf binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.map binary

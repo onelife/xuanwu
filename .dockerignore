@@ -1,0 +1,15 @@
+# The image only needs README.md, MANIFEST.in, setup.py, requirements*.txt, src/
+# and docs/ (MANIFEST.in references it).  The rest of the repository is mounted at
+# run time, so shipping it into the build context only slows the build down --
+# tests/firmware alone is several megabytes of prebuilt images.
+.git
+.github
+tests
+examples
+**/__pycache__
+**/*.pyc
+.pytest_cache
+build
+dist
+*.egg-info
+*.log

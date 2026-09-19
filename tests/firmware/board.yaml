@@ -1,0 +1,53 @@
+# Every bundled test firmware, and the board configuration that builds it.
+#
+#   python tests/firmware/build.py            # rebuild them all
+#   python tests/firmware/build.py sam3x8e    # rebuild one
+#   python tests/firmware/build.py --list     # show the matrix
+#
+# See docs/manual.zh-CN.md (中文使用手册) for the walkthrough, and
+# tests/firmware/README.md for the layout.
+#
+# `chip` is the xuanwu chip description an image is run against.  A board without
+# one yet (`chip:` left empty) still builds, and the test suite deliberately
+# leaves its firmware alone until the description exists -- that is the work list
+# for supporting the part.
+
+arduino_cli: arduino-cli
+
+boards:
+  - name: stm32f411
+    board: Generic STM32F4 series (STM32F411CEUx)
+    fqbn: STMicroelectronics:stm32:GenF4:pnum=GENERIC_F411CEUX
+    chip: stm32f411
+    sketch: Blink_m4
+    output: stm32f411
+
+  - name: sam3x8e
+    board: Arduino Due (Programming Port)
+    fqbn: arduino:sam:arduino_due_x_dbg
+    chip: sam3x8e
+    sketch: Blink_uart_m3
+    output: sam3x8e
+
+  - name: mkrzero
+    board: Arduino MKR Zero
+    fqbn: arduino:samd:mkrzero
+    chip:            # Cortex-M0+ / ATSAMD21G18
+    note: >-
+      No chip description yet.  A samd21.yaml needs the SAMD21 memory map (flash
+      0x00000000, SRAM 0x20000000), the M0+ core peripherals plus PORT/PM/GCLK,
+      and a second vendor family name.
+    sketch: Blink_mkrzero
+    output: mkrzero
+
+  - name: nucleo_f767zi
+    board: ST Nucleo-F767ZI
+    fqbn: STMicroelectronics:stm32:Nucleo_144:pnum=NUCLEO_F767ZI
+    chip:            # Cortex-M7 / STM32F767ZI
+    note: >-
+      No chip description yet.  An stm32f767.yaml needs the 2 MiB flash at
+      0x08000000 (the same base the STM32F411 uses, which is why this file and not
+      the load address decides the chip), 512 KiB of SRAM at 0x20000000, and the
+      core peripherals of a Cortex-M7.
+    sketch: Blink_f767zi
+    output: nucleo_f767zi
