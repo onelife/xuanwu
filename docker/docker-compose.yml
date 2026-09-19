@@ -1,0 +1,15 @@
+services:
+  xuanwu:
+    build:
+      # The build context is the repository root; the Dockerfile lives here.
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: xuanwu_image
+#    restart: always
+    container_name: xuanwu_container
+    volumes:
+      # The workspace root (the parent of the repository) mounted as before.
+      - '../:/home/onelife/xuanwu'
+    command: [/bin/bash]
+    stdin_open: true
+    tty: true
