@@ -5,6 +5,240 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — the ILI9341 model, and a real Adafruit library drawing on it
+
+- `src/xuanwu/peripherals/display/`: the panel side of a TFT, with no transport in it.
+  `DisplaySurface` is an RGB565 framebuffer with dirty-rectangle tracking, a hash, a
+  histogram, a bounding box and a PNG writer (pure Python -- no `Pillow` needed to look
+  at what a firmware painted).  `Ili9341` is the controller: command set, address
+  windows with wrap-around, `RAMWR`/`RAMWRC`, the GRAM, `MADCTL` rotation applied to
+  both the address counter and the image a viewer sees, `COLMOD`, sleep/display/
+  inversion state, the `0xD9` index-register protocol `readcommand8()` uses, and pixel
+  read-back.
+- `devices/display/`: `Ili9341Device` wires that to a shared SPI bus and a D/C pin and
+  keeps a viewer up to date; `Viewer` has a `headless` implementation (default, used by
+  the tests) and a `pygame` one behind the optional extra `xuanwu[gui]`.
+- `SpiBusSelector` (`peripherals/bus/spi.py`): several devices on one SPI controller,
+  each with its own GPIO chip select, which is what the Adafruit TFT shield needs -- it
+  carries an ILI9341 on D10 *and* a microSD socket on D4 on the same SPI header.  Bytes
+  go to whoever is selected and to nobody when none is; a device is told when its
+  transaction starts and ends, because that is where a flash resets its command latch
+  and a card ends its frame.  `SpiFlash` now joins the bus instead of taking the whole
+  controller over, so two devices can share one.
+- Chip descriptions can build on another one with `include:`, and the shield is
+  `sam3x8e_tft.yaml`: a handful of lines over `sam3x8e.yaml` instead of a copy of the
+  part.  The board's Arduino pin numbers are translated there (D9 = PC21, D10 = PC29,
+  D4 = PC26 -- the Due's numbering is *not* the port bit, and getting it wrong is
+  silent).
+- `tests/firmware/graphicstest_due_tft/` is Adafruit's own `graphicstest` built for the
+  Due against pinned library versions (`Adafruit ILI9341 1.6.0`, `Adafruit GFX 1.12.6`,
+  `Adafruit BusIO 1.17.4`, installed by `docker/Dockerfile` with `--no-deps` so the
+  touch controllers this board does not have are left out).  It runs to `Done!` and
+  prints the benchmark table, and its final frame is pinned as a golden digest with a
+  reviewed PNG in `docs/images/due_tft_graphicstest.png`.
+- `tests/firmware/Tft_smoke_m3/` uses the same libraries on a few known shapes so the
+  whole path can be checked pixel by pixel in seconds: a filled rectangle, an outline,
+  a fast line, a single pixel, text, and a marker drawn in landscape.  The drawing path
+  is verified against the coordinates the sketch used, not against itself -- including
+  that the filled rectangle is exactly 30x40 pixels and the outline exactly its
+  perimeter.
+- New tests: `tests/unit/test_display_surface.py`, `tests/unit/test_ili9341.py`,
+  `tests/unit/test_spi_selector.py`, `tests/integration/test_display_layer.py` (the
+  shield driven through memory-mapped registers), `tests/integration/test_due_tft.py`
+  and `tests/integration/test_due_tft_milestone.py` (the full run, marked `milestone`
+  and deselected by default: it takes about three minutes).
+
+### Fixed — guest memory cost a Python callback per access on the SAM3X8E
+
+- The SAM3X8E maps SRAM0 twice: at `0x20000000`, and remapped at `0x20070000`, which is
+  where the Due's linker script puts the stack and heap.  The alias was implemented with
+  forwarding callbacks, so *every* stack access in *every* SAM firmware went through
+  Python: about a microsecond each, which pinned the whole simulator at 8.5 M
+  instructions/s and made the TFT work impossible.
+- `type: memory` regions are now backed by host memory (`uc_mem_map_ptr`) and a `remap`
+  maps the *same* host buffer at the second address, which is what the hardware does.
+  Nothing on the host is involved in either view, and writes through one are visible
+  through the other.  Measured on `Blink_m3`: **8.5 → 189 M instructions/s (22x)**;
+  `Blink_uart_m3` 157 M/s, and the graphicstest firmware 12 M/s (the rest is SPI
+  traffic, see below).
+
+### Fixed — an SPI transfer that nothing answers still shifts a byte in
+
+- `SPI.transfer()` in the SAM core polls the receive flag after *every* byte it sends,
+  so a controller that only answers when a device has something to say hangs the first
+  write to a write-only part.  With nothing driving the data line the master reads the
+  idle level (`0xFF`), and that is what the model returns now.
+- The byte kept for a read is the one that was on the line *during* the transfer, i.e.
+  the device's answer to the *previous* byte -- a shift register cannot answer a byte
+  while it is still receiving it.  Reading `n` bytes therefore takes `n + 1` clocks,
+  which is why drivers clock a dummy byte first; the tests say so explicitly instead of
+  hiding it.
+
+### Changed — the SAM UART is polled once per character time, not every 512 instructions
+
+- Every poll of the host side ends an execution slice, so a firmware with `Serial`
+  open was paying Python work thousands of times per simulated millisecond for input
+  that could not have arrived yet.  The interval is now derived from the peripheral
+  clock and the baud rate (about 7300 instructions at 115200 baud, one character),
+  which is as prompt as the line can be, and it is what the chip description's
+  `clock:`/`baudrate:` are for.
+- The chip-select level a shared SPI bus reads is also sampled per byte rather than
+  trusted from the last edge, because firmware routinely writes a chip select to the
+  level it already had -- which raises no edge at all.
+
+### Added — chip descriptions can include another one
+
+- `include:` merges a second description underneath the current file (scalars from the
+  including file win; `peripherals` and `devices` are concatenated), relative to the
+  file or by bundled chip name, with cycles reported as an error.  The conformance
+  checks load descriptions the same way the simulator does, so an overlay that failed
+  to inherit the part cannot pass vacuously.
+
+### Added — the SAM3X8E address map is audited against the datasheet
+
+- `tests/conformance/test_sam3x8e_map.py` checks every peripheral base and size in
+  `sam3x8e.yaml` against the values taken from the datasheet, plus the peripherals
+  that are deliberately *not* modelled (HSMCI, SSC, SPI1, TC0-2, USART0-3, EMAC,
+  CAN0/1, TRNG, DMAC, DACC, SMC, SDRAMC, MATRIX, CHIPID, RSTC, SUPC, RTTC, WDT, RTT,
+  GPBR) so a missing model stays a decision instead of an oversight. It also records
+  why `UOTGHS` is the *device* block at `0x400AC800` and not the general block at
+  `0x400AC000`: a booted firmware polls the device block for `CLKUSABLE`.
+- `ArmSamPmc`'s offsets were checked in the process: `PCSR0` is at `0x18`, `SR` at
+  `0x68` and `PCER1`/`PCSR1` at `0x100`/`0x108`.
+
+
+
+- `ArmSamTwi` (`arch/vendor/atmel/twi.py`) over the vendor-neutral `I2cController`:
+  `CR`/`MMR`/`SMR`/`IADR`/`CWGR`/`SR`/`IER`/`IDR`/`IMR`/`RHR`/`THR`, with `SR` built
+  from the core (`TXCOMP|TXRDY` when idle, `RXRDY` after a byte arrives, `NACK` when
+  nobody answers, `SVREAD`/`SVACC`/`EOSACC` during a transaction) and `PW_*` reported
+  as always ready because this model never stretches the clock.
+- TWI0 (`0x4008C000`) and TWI1 (`0x40090000`) are in the chip description with their
+  IRQ numbers (22/23), which is what `Wire1` and `Wire` address on a Due.
+- The ASF sequence the Arduino `Wire` library drives -- write `MMR`, write `IADR`, the
+  first `THR` write *starts* the transfer, poll `SR.TXRDY` per byte, `CR.STOP`, poll
+  `SR.TXCOMP`; for a read, `MMR|MREAD`, `CR.START`, poll `SR.RXRDY`, read `RHR` --
+  is covered byte by byte in `tests/unit/test_twi.py`.
+- `ArmSamEfc` covers `FMR`/`FCR`/`FSR`/`FRR`/`FVR` for both banks, so the flash wait
+  states the Arduino core sets no longer land on an unclaimed address. `FSR` always
+  reports `FRDY`.
+
+### Changed — `SpiBus` is a protocol, not a base class
+
+- A bus and a device on it now only have to have the same *shape*
+  (`write`/`read`/`in_waiting`), which is what the serial bridges in `backends`
+  already had. Declaring it `@runtime_checkable` means a flash chip and a host pty
+  are the same thing to the controller, and neither inherits from the other.
+
+### Fixed — the PMC reported PLLA as locked by the wrong field
+
+- `LOCKA` was derived from the multiplier field of `CKGR_PLLAR`, so a valid
+  `ONE | DIVA=1 | MULA=0` write (divide by one) looked unlocked while a write that
+  leaves the PLL switched off looked locked. It now follows `DIVA != 0` and is only
+  touched by a write with the `ONE` bit set -- which is also what makes selecting
+  PLLA as the master clock before bringing it up correctly *never* report `MCKRDY`
+  (a real firmware would hang there too). Found while writing the clock-switch test.
+
+### Fixed — `SCB.set_active()` wrote the opposite bit
+
+- `state=True` took the clear-this-bit branch, so `SHCSR.SYSTICKACT` and
+  `ICSR.PENDSTSET` read back inverted and the `pend` term of the Arduino SAM
+  `micros()` was computed from the wrong value. Three regression tests pin the bit
+  directions down; the `micros()` tests had to use a self-spinning program rather
+  than a firmware, because a firmware configures SysTick itself and hides the bug.
+
+### Fixed — a software reset on SPI returned to master mode
+
+- `CR.SWRST` clears `MR`, including `MSTR`, but the adapter wrote `MR` directly,
+  bypassing the hook that keeps the core in step, so the controller still believed it
+  was the master. It now tells the core as well.
+
+### Added — vendor-neutral behaviour cores
+
+- New `src/xuanwu/peripherals/` package: the protocol lives there, the register
+  layout stays in `arch/vendor/`. A model is now a register table plus the mapping
+  from its bits onto a core, so supporting another vendor means writing an adapter
+  instead of another copy of the protocol.
+  - `GpioPort` — direction, selection, driven levels, **levels a device drives on an
+    input pin** (so `digitalRead`/`PDSR` see them), pull-ups, and three hook
+    granularities: the classic `(on_high, on_low)` pair, `add_edge_hook(pin, fn)`
+    with the level, and `add_port_hook(fn)` reporting every change as
+    `(pin, level)` — which is what a parallel bus needs to latch eight data lines.
+  - `SpiController`/`SpiBus` — one byte out with the answer kept until read
+    (including the overrun case), chip-select mask, and the variant-independent
+    status the adapter maps onto its own bits.
+  - `I2cController`/`I2cBus`/`I2cDevice`/`RegisterDevice` — the START/address/ACK/
+    STOP sequence, the internal-address register emitted the way the hardware does
+    it (pointer bytes, then a repeated START for a read), and a base class for the
+    common "first written byte selects a register" part. Used by the SAM TWI adapter
+    in M6.2; the core and its tests land here.
+- `ArmSamGpio` and `ArmSamSpi` are adapters over those cores now. `PDSR` is derived
+  from the port, so a device-driven input is visible to the guest.
+- 26 unit tests in `tests/unit/test_peripheral_cores.py` cover the cores with no
+  chip in sight: no addresses, no register names, no vendor IRQ numbers.
+
+### Fixed — `PSR` is not the pin levels
+
+- The first version of the GPIO adapter derived `PSR` from the port's levels. In the
+  SAM PIO, `PSR` is the **mirror of `PER`** (which pins the PIO peripheral controls)
+  and `PDSR` is the pin data; the Arduino core reads `PSR` during `setup()`, took a
+  different branch, and the firmware never reached its loop — the LED stopped
+  toggling. Found by the device-layer test that runs the real firmware, which is
+  exactly what it is for.
+
+### Changed — execution is sliced instead of hooked per instruction
+
+- **Throughput went from 0.85 M to 138.6 M instructions/s** (163x) for the same
+  firmware; Unicorn alone, with no hooks at all, reaches 176 M/s. The whole suite
+  went from 70 s to 23 s. Measured on `stm32x411` + `Blink_m4.ino.elf`.
+- The interrupt engine no longer dispatches from a `UC_HOOK_CODE` callback. A model
+  can only change through an MMIO access, a timer deadline or external input, and
+  all three end an execution slice, so `XuanWu.run()` now takes pending exceptions
+  and then runs exactly `ArmHardwareController.next_slice()` instructions -- the
+  smallest of `max_slice` (10 000 by default), every timed model's next deadline and
+  what is left of the budget. An interrupt pended by a register write is therefore
+  taken at the next boundary, within `max_slice` instructions (0.12 ms of simulated
+  time at 84 MHz); a deadline-driven one (SysTick) is not delayed at all.
+- Models observe time through a new `advance(instructions)` / `next_deadline()`
+  pair instead of a per-instruction callback. SysTick and the PWM were migrated;
+  the SAM UART now samples its host side once per slice (and on `SR` reads), and
+  `next_deadline()` reports a poll interval so external input latency stays bounded.
+- Slicing can end inside a Thumb IT block, and Unicorn implements the end of an IT
+  block as a store into its cached IT state that an early exit skips -- the next
+  slice then resumed with a stale "still in an IT block" state and rejected the
+  following instruction as invalid. `repair_stale_it_state()` looks for a real `IT`
+  encoding in the previous eight bytes and, if there is none, clears the leftover.
+- `run(until=...)` keeps a counting hook for the duration of that call, because
+  Unicorn cannot report how many instructions it executed and the time base has to
+  stay exact.
+
+### Fixed — `SPREALIGN` was written into the Thumb IT state
+
+- `push_context` computed the forced-alignment flag as the *mask* (`0` or `4`) and
+  then shifted it by 9, writing `0x800` into the stacked xPSR. Bit 9 is SPREALIGN;
+  bit 11 is `IT[3]`. Every exception therefore corrupted the IT state of the
+  interrupted context, and a conditional branch after the return was rejected as an
+  invalid instruction. `pop_context` reads bit 9, so the alignment bit itself was
+  never read back correctly either. Found by running the RT-Thread firmware under
+  sliced execution, which moved the boundary onto the corrupted path.
+- `ArmHardwareBase.next_deadline()` has a default of "never", so a model that only
+  implements `advance()` cannot be caught out by the scheduler.
+
+### Changed — SPI register reads cost less
+
+- `ArmSamSpi` fetches the byte a transfer returned when `TDR` is written, instead of
+  leaving it in the device until `RDR` is read. Firmware polls `SR` before *and*
+  after every byte, and `SR.RDRF` was derived from the device each time; it is now
+  derived from the prefetched byte, so the hot path no longer calls into the device
+  at all. An unread byte is kept, which is the overrun case.
+
+### Added — the SAM3X8E + TFT shield plan
+
+- `docs/plan-sam3x8e-tft.md`: bringing up the Arduino Due with the Adafruit 2.8"
+  TFT Touch Shield v2 (ILI9341 over SPI, FT6206 over I2C, microSD over SPI), the
+  peripheral work it needs, the sub-projects that simulate the display/touch/storage,
+  the firmware ladder and the measured numbers behind the ordering.
+
 ### Added — the test firmware is built from sketches
 
 - **Arduino CLI replaces the system Arm compiler.** `docker/Dockerfile` installs the

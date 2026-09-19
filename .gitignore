@@ -133,3 +133,6 @@ dmypy.json
 # the test suite needs no Arm toolchain.
 tests/firmware/**/*.map
 tests/firmware/**/*.with_bootloader.*
+
+# What `python examples/tft.py` writes when it is given no output path.
+/tft.png

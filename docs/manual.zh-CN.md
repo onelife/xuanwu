@@ -10,7 +10,7 @@
 - [5. 用 GDB 调试](#5-用-gdb-调试)
 - [6. semihosting：让 firmware 直接 printf](#6-semihosting让-firmware-直接-printf)
 - [7. 浮点（FPU）](#7-浮点fpu)
-- [8. 外部器件（LED、SPI Flash）](#8-外部器件ledspi-flash)
+- [8. 外部器件（LED、SPI Flash、TFT 屏）](#8-外部器件ledspi-flashtft-屏)
 - [9. 构建测试固件（Arduino CLI）](#9-构建测试固件arduino-cli)
 - [10. 跑测试](#10-跑测试)
 - [11. 加一颗新芯片](#11-加一颗新芯片)
@@ -468,7 +468,7 @@ python examples/fpu.py
 
 ---
 
-## 8. 外部器件（LED、SPI Flash）
+## 8. 外部器件（LED、SPI Flash、TFT 屏）
 
 芯片描述里可以声明「板子上还接了什么」：
 
@@ -514,6 +514,62 @@ device.dev["FLASH"].read_memory(0x40, 6)
 ```
 
 加一个新器件类型：在 `src/xuanwu/devices/` 里实现 `Device`（`attach()` 拿到 `DeviceContext`，用 `ctx.peripheral("GPIOB")` 找外设），然后注册进 `devices/__init__.py` 的 `BUILDIN`。
+
+### 8.1 TFT 屏：Arduino Due + Adafruit 2.8" TFT Touch Shield v2
+
+这块兵牌上有两个 SPI 器件（ILI9341 面板 + microSD）共用一个 SPI 控制器，各自一个 GPIO 片选，
+所以总线是**共享**的：`SpiBusSelector` 按片选把每个字节送给对应器件，没人选中时谁都不收。
+板级描述 `sam3x8e_tft.yaml` 用 `include:` 叠在 `sam3x8e.yaml` 上，只写差异：
+
+```yaml
+chip:
+  name: sam3x8e_tft
+  include: sam3x8e.yaml
+  devices:
+    - name: LCD
+      type: ili9341
+      port: SPI
+      cs: {port: GPIOC, pin: 29, active_low: true}   # D10 = PC29
+      dc: {port: GPIOC, pin: 21}                     # D9  = PC21
+      viewer: headless          # headless | pygame | none
+```
+
+> 注意 Due 的 Arduino 引脚号**不是**端口位号：D9 是 PC21、D10 是 PC29、D4 是 PC26
+> （PD9/PD10 是 Arduino 的 30/32 号脚）。写错不会报错，只是面板永远收不到字节。
+
+跑一个用 Adafruit 官方库画图的固件，不需要任何 GUI：帧缓冲就在模型里，可以逐像素断言，
+也可以直接导出 PNG：
+
+```bash
+python examples/tft.py                    # 跑冒烟固件 + 导出 tft.png（约 3 s）
+python tests/firmware/build.py due_tft_smoke        # 需要 arduino-cli 与钉版本的 Adafruit 库
+pytest tests/integration/test_due_tft.py -q         # 3.9 s，逐像素验收
+pytest -m milestone tests/integration/test_due_tft_milestone.py   # Adafruit graphicstest 全程，约 3 分钟
+```
+
+```python
+from xuanwu import XuanWu
+from xuanwu.peripherals.display import rgb565
+
+device = XuanWu("sam3x8e_tft", "tests/firmware/due_tft_smoke/Tft_smoke_m3.ino.elf",
+                hardware_options={"bridge": "loopback"})
+device.reset()
+device.run(count=45_000_000)
+lcd = device.dev["LCD"]
+lcd.pixel(10, 20)                 # 0xf800：固件画在那个坐标的红色方块
+lcd.core.commands[:6]             # [0x01, 0xef, 0xcf, 0xed, 0xe8, 0xcb]：库的初始化序列
+lcd.surface.digest()              # 整帧哈希，用来和 golden 比对
+lcd.save("screen.png")            # 纯 Python 写出的 PNG，不需要 Pillow
+```
+
+想**看着它画**（可选依赖 `xuanwu[gui]`，即 pygame）：
+
+```yaml
+      viewer: pygame
+```
+
+CI 或没有显示器时用 `SDL_VIDEODRIVER=dummy`；`viewer: headless` 是默认值，
+它保留最后一帧并允许 `save()`，但不开窗口。
 
 ---
 
@@ -570,6 +626,11 @@ arduino-cli core install arduino:sam
 arduino-cli core install arduino:samd
 arduino-cli core install STMicroelectronics:stm32@3.0.0
 
+# TFT 固件用的 Adafruit 库，版本与 docker/Dockerfile 保持一致（--no-deps 免装用不到的触摸库）
+arduino-cli lib install --no-deps "Adafruit BusIO@1.17.4"
+arduino-cli lib install --no-deps "Adafruit GFX Library@1.12.6"
+arduino-cli lib install --no-deps "Adafruit ILI9341@1.6.0"
+
 # 编译（sketch 目录必须与 .ino 同名）
 arduino-cli compile \
     --fqbn arduino:sam:arduino_due_x_dbg \
@@ -577,6 +638,10 @@ arduino-cli compile \
     --export-binaries \
     tests/firmware/Blink_uart_m3
 ```
+
+> `--export-binaries <sketch 目录>` 会把产物也复制进 sketch 目录。所以 `board.yaml` 里的
+> `output` 必须与 `sketch` 不同名，否则 `.elf` 会和 `.ino` 混在一起（`tests/conformance/
+> test_firmware_matrix.py` 会检查这一点）。
 
 找板子的 FQBN：
 
@@ -622,9 +687,12 @@ pytest tests/conformance -q           # 芯片描述 + 固件矩阵的一致性�
 pytest tests/integration -q           # 真跑固件：UART、GDB、semihosting、器件、例子脚本
 pytest tests -q -m "not slow"         # 跳过较慢的
 pytest tests -q -k fpu                # 只跑与 fpu 相关的
+pytest -m milestone -q                # 只有里程碑验收（默认不跑，见下）
 ```
 
-markers：`integration`（要跑真实固件）、`conformance`（校验 YAML/清单）、`slow`（构建 wheel、跑例子脚本之类）。
+markers：`integration`（要跑真实固件）、`conformance`（校验 YAML/清单）、`slow`（构建 wheel、
+跑例子脚本之类）、`milestone`（**默认被 `addopts = -m "not milestone"` 排除**：那是
+Adafruit `graphicstest` 全程这类要跑几分钟的验收）。
 
 几件值得知道的事：
 

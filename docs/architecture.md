@@ -25,8 +25,9 @@ simulation, and where to hook in when something is missing.
           │             ├── vendor/st/      RCC, GPIO
           │             └── vendor/atmel/   PMC, PDC, PIO, ADC, UART, SPI, PWM, UOTGHS
           │
+   peripherals/ vendor-neutral behaviour cores (GPIO port, SPI/I2C master, displays)
    backends/    host-dependent code: serial bridges, semihosting
-   devices/     external device models (LED, SPI flash) + registry
+   devices/     external device models (LED, SPI flash, ILI9341) + registry
    data/        chip descriptions (YAML) and GDB target descriptions (XML)
 ```
 
@@ -87,10 +88,14 @@ to `0x0`, which is why the vector table is fetchable at address zero.
 
 Three levels, in `memory.py`:
 
-1. **`mem_map`** — plain RAM/Flash. `MemoryController` keeps a registry of
-   `(start, end, perms, buffer, desc)` so it can answer "what is mapped here".
-2. **`mmio_map`** — a callback region with a backing `bytearray`. Used for
-   aliases, bit-band windows and peripheral windows.
+1. **`mem_map`** — plain RAM/Flash, backed by a host buffer (`uc_mem_map_ptr`). The
+   buffer is what makes `remap` free: a chip that shows the same RAM at two addresses
+   (the SAM3X8E does — SRAM0 at `0x20000000` and remapped at `0x20070000`, where the
+   Due's linker script puts the stack) gets *one* host buffer mapped twice, so neither
+   address costs a callback and writes through one are visible through the other.
+   Forwarding callbacks are the fallback for a region that is not host-backed.
+2. **`mmio_map`** — a callback region with a backing `bytearray`. Used for aliases,
+   bit-band windows and peripheral windows.
 3. **`register_io`** — inside a callback region, a second, finer registry maps
    `(address, size)` to a peripheral model's `read`/`write`. The callback looks
    the address up there first and only falls back to the byte buffer when
@@ -99,7 +104,43 @@ Three levels, in `memory.py`:
 That third level is what lets a single 64 KiB `peripheral` window host a dozen
 peripherals that each know their own register layout.
 
+The first level matters more than it looks: a hardware remap implemented with callbacks
+costs a Python call per guest access (a microsecond each), which pinned the SAM3X8E at
+8.5 M instructions/s — a fifth of the STM32F411's rate on the same host — until the
+alias shared the host buffer instead.
+
 ## 5. Peripheral models
+
+A peripheral model is a *register table* plus the mapping from register bits onto a
+*vendor-neutral behaviour core*. The core owns the behaviour -- how a GPIO port
+tracks levels and notifies devices, how an SPI master moves a byte, how an I2C
+master runs a transaction -- and the adapter in `arch/vendor/` owns the layout, the
+write-one-to-set/clear pairs, the write-protection keys and the status-bit meanings.
+Supporting another vendor is then a matter of writing an adapter rather than
+another copy of the protocol.
+
+`peripherals/` holds those cores and nothing else: no base addresses, no register
+names, no vendor IRQ numbers.
+
+| Core | What it owns | What the adapter adds |
+|---|---|---|
+| `GpioPort` | direction, selection, driven levels, levels a device drives, the three hook granularities | `PER`/`OER`/`SODR`/`CODR`/`PDSR` and the write-protection key |
+| `SpiController` | one byte out, one answer kept, overrun, chip-select mask | `CR`/`MR`/`TDR`/`RDR`/`SR`/`CSR0-3`, the NPCS decoding |
+| `I2cController` | START/STOP, address and direction, ACK/NACK, internal address | the TWI register block (M6.2) |
+| `I2cBus` / `I2cDevice` / `RegisterDevice` | addressing, routing, the register-pointer protocol | nothing: devices implement it |
+
+The device layer subscribes through the cores: `GpioPort.add_hook(pin, (on_high,
+on_low))` is the classic pair, `add_edge_hook(pin, fn)` passes the level, and
+`add_port_hook(fn)` reports every change as `(pin, level)` -- which is what a
+parallel bus needs to latch eight data lines on a strobe. `GpioPort.drive_input()`
+and `release_input()` are how a device pulls an input pin, and that is what
+`digitalRead` (i.e. `PDSR`) then reports.
+
+One naming trap is worth recording, because it cost a debugging session: in the SAM
+PIO, **`PSR` is the mirror of `PER`** -- which pins the PIO peripheral controls --
+while **`PDSR` is the pin levels**. Deriving `PSR` from the port's levels makes the
+Arduino core take a wrong branch during `setup()` and the firmware never reaches its
+loop; the firmware tests caught it immediately.
 
 `arch/base.py` provides the whole framework in about 190 lines.
 
@@ -147,9 +188,12 @@ Common patterns from the existing models:
 - **command registers** — `PMC.PCR` is a read/write command register, not
   storage.
 
-Models that need to observe time pass `system_clock_callback`, which the
-hardware controller attaches as a `UC_HOOK_CODE` callback; SysTick and the PWM
-use it to advance counters.
+Models that need to observe time implement `advance(instructions)` (and, if they
+have a deadline of their own, `next_deadline()`); the controller calls them once
+per execution slice. SysTick, the UART (which polls its host side) and the PWM use
+it to advance counters. The older `system_clock_callback` is still attached as a
+`UC_HOOK_CODE` callback when a model defines it, but it costs a Python call per
+instruction and is deprecated.
 
 ## 6. Name resolution
 
@@ -168,16 +212,18 @@ typo in a chip YAML fails in seconds instead of at simulation time.
 ## 7. Interrupt engine
 
 `arch/cortex_m/controller.py` implements the Armv7-M exception model on top of
-Unicorn's `UC_HOOK_INTR` and `UC_HOOK_CODE`.
+Unicorn's `UC_HOOK_INTR` (for exception entry and exit) and an execution-slice
+scheduler (see §7.2).
 
 - **Entry** happens either from a peripheral asking for it
   (`set_irq_pending`) or from the guest writing `NVIC.ISPR` / `SCB.ICSR`.
   `get_next_irq()` picks the highest-priority pending interrupt that is not
   masked by `PRIMASK`, `FAULTMASK` or `BASEPRI`, taking the priority-grouping
-  split into account.
+  split into account. It is taken at the next slice boundary, which is the only
+  place the state can have changed.
 - **Stacking** (`push_context`) writes the eight-word exception frame, honours
-  the `CCR.STKALIGN` forced alignment, records the alignment in `xpsr` bit 9 and
-  builds the matching `EXC_RETURN` value in `lr`.
+  the `CCR.STKALIGN` forced alignment, records the alignment in `xpsr` **bit 9**
+  and builds the matching `EXC_RETURN` value in `lr`.
 - **Floating-point frame.** When the interrupted context had used the FPU
   (`CONTROL.FPCA`, which Unicorn sets by itself after a VFP instruction) the FP
   extension stacks a further 0x48 bytes *below* the integer frame: `S0`-`S15`,
@@ -210,16 +256,50 @@ controller can treat both uniformly.
 ### 7.1 The time base
 
 `arch/cortex_m/systick.py` is the only clock in the model, and it is driven by the
-same `UC_HOOK_CODE` mechanism as the interrupt engine: every executed instruction
-advances the counter by `cycles_per_instruction` (the chip YAML's `clock` gives
-the core frequency the time base is derived from, and `CALIB.TENMS` follows it).
-A period is `RVR + 1` cycles and the periods that elapsed are counted in one step,
-so the long-run rate is exact even when the factor is fractional.
+scheduler: `advance(instructions)` moves the counter arithmetically by a whole
+slice, and `next_deadline()` reports how many instructions may still run before the
+counter wraps, which is what bounds the slice. The chip YAML's `clock` gives the
+core frequency the time base is derived from, and `CALIB.TENMS` follows it. A
+period is `RVR + 1` cycles and the periods that elapsed are counted in one step, so
+the long-run rate is exact even when `cycles_per_instruction` is fractional.
 
 Unicorn does not report instruction costs, so `cycles_per_instruction` is an
 approximation, not a measurement: the default of 1 means "one cycle per
 instruction". `SysTick.cycles`, `.ticks` and `.elapsed_ms` expose the simulated
 time base, which is what tests assert on instead of wall-clock time.
+
+### 7.2 Execution slices
+
+`XuanWu.run()` does not hand the whole budget to Unicorn. It repeatedly takes any
+pending exception and then runs exactly as many instructions as
+`ArmHardwareController.next_slice()` allows: the smallest of the configured
+maximum slice (`max_slice`, 10 000 instructions by default), every timed model's
+next deadline, and what is left of the caller's budget. The instruction count of a
+slice is exact, because Unicorn's `count` is exact, so the time base never drifts.
+
+The point is throughput. Advancing models from a `UC_HOOK_CODE` callback means one
+Python call per instruction, which measured **0.85 M instructions/s**; running to
+the next deadline instead measured **138 M instructions/s** for the same firmware
+(Unicorn alone reaches 176 M/s). What makes that legitimate is an invariant:
+
+> A model's state can only change through an MMIO access, a timer deadline or
+> external input. All three end a slice, so between slices nothing can change and
+> no exception can become pending.
+
+The consequences worth knowing:
+
+- An interrupt pended by an MMIO write is taken at the next slice boundary, so its
+  latency is bounded by `max_slice` instructions (0.12 ms of simulated time at
+  84 MHz). A deadline (SysTick, a UART polling its host) ends the slice exactly
+  when it is due, so those are not delayed at all.
+- `run(until=...)` needs the exact instruction count, and Unicorn cannot report how
+  many it executed, so that path registers a counting hook for the duration of the
+  call. It is the rare, explicit path.
+- A slice may end inside a Thumb IT block. Unicorn implements the end of an IT
+  block as a store into its cached IT state, which an early exit skips, so the next
+  slice resumes with a stale "still in an IT block" state and rejects the following
+  instruction as invalid. `repair_stale_it_state()` detects that by looking for a
+  real `IT` encoding in the previous eight bytes and clears it.
 
 ## 8. GDB stub
 
@@ -290,18 +370,36 @@ Each entry needs a `type` (the registry key) and a `name`; everything else is
 passed to the model's constructor. A device gets a
 :class:`~xuanwu.devices.base.DeviceContext` and can:
 
-- **watch a pin** — `ctx.peripheral("GPIOB").add_hook(pin, (on_high, on_low))`.
-  The GPIO model calls the first hook when a pin is driven high and the second
-  when it is driven low. This is what `Led` and the SPI flash's chip select use.
+- **watch a pin** — `ctx.gpio("GPIOB").add_hook(pin, (on_high, on_low))` (or
+  `add_edge_hook` / `add_port_hook` when the level matters more than the edge). The
+  GPIO model calls the first hook when a pin is driven high and the second when it is
+  driven low. This is what `Led` and a chip select use.
 - **take over a byte stream** — assign `peripheral.bridge = self` on a UART or
   SPI model; the model then reads and writes through the device instead of
   through `socat` or TCP. `SpiFlash` implements `SerialBridge` for exactly this.
+- **share a byte stream** — `ctx.spi_bus("SPI")` returns the `SpiBusSelector` for that
+  controller, and `bus.add(name, device, gpio=port, pin=cs_pin, active_low=True)` puts
+  the device on it. Every byte goes to whichever device has its chip select asserted
+  (sampled per byte, because firmware often writes a chip select to the level it
+  already had, which raises no edge), the device is told when its transaction starts and
+  ends, and bytes nobody is selected for reach the fallback bus the controller used
+  before (a host bridge, usually) instead of being invented. This is what two devices
+  on one controller need — the Adafruit TFT shield has an ILI9341 and a microSD socket
+  on the same SPI header.
 
 `SpiFlash` is also a worked example of a state machine driven by bus traffic: a
 chip-select edge starts a transaction, the first byte after it selects a command,
 address bytes follow for the commands that take one, and responses are queued for
 the receive register. A real part behaves the same way, including clearing the
 write-enable latch when the transaction ends.
+
+An SPI transfer always shifts a byte in, even when nothing on the bus is driving the
+data line: the master reads the idle level (`0xFF`), and the byte it keeps is the one
+that was on the line *during* the transfer — the device's answer to the previous byte,
+because a shift register cannot answer a byte while it is still receiving it. Reading
+`n` bytes therefore costs `n + 1` clocks, which is why drivers clock a dummy byte
+first, and why the SPI core tests index into the exchange instead of expecting the
+interesting byte first.
 
 Because a device is a `SerialBridge`, `create_bridge()` accepts one directly, so
 a peripheral can also be handed a device explicitly:

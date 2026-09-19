@@ -72,7 +72,12 @@ def test_referenced_repo_paths_exist(path, repo_files):
     Docs refer to files by a suffix rather than a full path (``arch/base.py`` from
     the architecture guide, ``stm32f411.yaml`` from the README), so a mention counts
     as resolved when *some* file in the repository ends with it.
+
+    A plan is the one document that names files on purpose *before* they exist, so
+    it is exempt; its links still have to resolve.
     """
+    if path.name.startswith("plan-"):
+        pytest.skip("a plan describes files that do not exist yet")
     text = path.read_text(encoding="utf-8")
     candidates = set(re.findall(r"`([A-Za-z0-9_./-]+\.(?:py|md|yaml|yml|sh|ino|xml|cfg|toml|txt))`", text))
     missing = []
