@@ -5,6 +5,134 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — floating-point support
+
+- The Cortex-M FP extension is modelled, so an Armv7E-M core runs VFP code and
+  the exception engine stacks the extended frame:
+  - `arch/cortex_m/fpu.py` (`ArmHardwareFpu`) answers the FP system registers a
+    Cortex-M4F firmware reads while starting up: `FPCCR`, `FPCAR`, `FPDSCR` and
+    `MVFR0/1/2`. `FPCCR.LSPACT` always reads as zero, which is what a model
+    without lazy stacking has to report.
+  - `push_context`/`pop_context` stack and restore the floating-point frame —
+    `S0`-`S15`, `FPSCR` and the reserved word, 0x48 bytes *below* the 0x20-byte
+    integer frame — whenever `CONTROL.FPCA` is set, and clear `EXC_RETURN` bit 4
+    so the return path pops it again.
+  - `arm_core_registers` gained `s0`-`s31`, `d0`-`d15` and `q0`-`q15`.
+  - `stm32f411.yaml` declares the block:
+    `- FPU: {type: core, base: 0xE000EF30, size: 0x1C}`. A chip that does not
+    declare it keeps the old behaviour.
+- The GDB stub describes the FP register file when the core has one: it serves
+  `arm-m-profile.xml` followed by `arm-vfpv2.xml` and lays the `g` packet out in
+  that order (17 core registers, then `d0`-`d15` and `fpscr`). Verified against a
+  real `gdb-multiarch`, which now reports `d0`/`fpscr` instead of falling back to
+  its own default register set.
+- `tests/firmware/stm32f411/fpu_test/` — a bare-metal Cortex-M4F firmware that
+  holds four values in `S0`-`S3` across three SysTick interrupts whose handler
+  clobbers those very registers. The values can only survive if the FP frame is
+  stacked and restored, and a negative control run disables the stacking and
+  asserts the values are destroyed, so the test cannot pass vacuously.
+
+### Fixed — `EXC_RETURN` from an FP frame was rejected
+
+- The exception-return validator required bits 31:4 to be all ones, which
+  rejected every `EXC_RETURN` that reports a stacked FP frame (`0xFFFFFFE1`,
+  `0xFFFFFFE9`, `0xFFFFFFED`) with `RuntimeError: UNPREDICTABLE`. It now requires
+  bits 31:5 and one of the four valid mode nibbles.
+
+### Fixed — the semihosting trap left the core in Arm state
+
+- Stepping the PC over `BKPT 0xAB` wrote an even address to the program counter.
+  Unicorn reads bit 0 of a PC write as the instruction-set selector, so the next
+  instruction was fetched in Arm state and the run died with
+  `UC_ERR_INSN_INVALID`. The write now goes through a new
+  `RegisterController.pc_t` setter, which keeps the bit set.
+
+### Fixed — `run(count=...)` counted milliseconds
+
+- `XuanWu.run()` passed its instruction budget as the third positional argument
+  of `uc_emu_start()`, which is the *timeout*. Every `run(count=N)` therefore ran
+  for N milliseconds instead of N instructions: the small counts used by tests
+  were timing-dependent, and the documented "execute 500k instructions" was
+  wrong. Both limits are now passed by keyword.
+
+### Added — external device layer
+
+- `device.py` is no longer an empty stub. A chip description can now declare
+  what is wired to the MCU, and those devices are built and attached once the
+  peripherals exist:
+  ```yaml
+  devices:
+    - name: LED
+      type: led
+      port: GPIOB
+      pin: 27
+    - name: FLASH
+      type: spi_flash
+      port: SPI
+      cs: {port: GPIOC, pin: 26, active_low: true}
+  ```
+  `device.dev["LED"]`, `device.dev.names()` and iteration over `device.dev`
+  expose them.
+- Two device models ship: `led` (watches a GPIO pin through
+  `ArmSamGpio.add_hook`, which had no callers until now) and `spi_flash` (a NOR
+  flash that answers JEDEC ID, read status, write enable/disable, read data,
+  page program and the three erase commands, framed by its chip-select pin).
+- A device can take over a peripheral's byte stream by assigning
+  `peripheral.bridge = itself`, so the SPI bus is driven in-process instead of
+  through `socat` or TCP. `create_bridge()` accepts a `SerialBridge` instance
+  for that, and a new `NullBridge` (`bridge: none`) provides a peripheral with
+  no host end at all.
+- `sam3x8e.yaml` declares the two devices and sets `bridge: none` on SPI.
+
+### Fixed — SPI status register
+
+- `ArmSamSpi.fix_after_read` computed `RDRF`/`TXEMPTY`/`OVRES` into a local and
+  then returned the unmodified value, so `SR.RDRF` was permanently clear and any
+  firmware polling it hung. The derived bits are now merged into the returned
+  value and written back.
+
+### Fixed — properties on peripheral models
+
+- `ArmHardwareBase.__setattr__` wrote straight into `__dict__`, bypassing data
+  descriptors, so a property setter on a model silently never ran (it is how
+  `peripheral.bridge = device` used to leave the old bridge in place). It now
+  honours descriptors.
+
+### Added — semihosting
+
+- Arm semihosting is served. Firmware built with the semihosting spec files now
+  gets its `printf` on the host console (or into any stream you pass) with no
+  UART or serial bridge involved:
+  `XuanWu(chip, code, semihosting=SemiHosting(output=stream))`.
+  Implemented: `SYS_WRITEC`, `SYS_WRITE0`, `SYS_WRITE`, `SYS_READC`, `SYS_ISTTY`,
+  `SYS_CLOCK`, `SYS_TIME`, `SYS_ERRNO`, `SYS_ISERROR`, `SYS_FLEN`, `SYS_SEEK`,
+  `SYS_TICKFREQ`, `SYS_ELAPSED`, `SYS_GET_CMDLINE`, `SYS_HEAPINFO`, `SYS_EXIT`
+  and `SYS_EXIT_EXTENDED`. Unsupported calls are logged and return `-1`.
+- Unicorn reports `BKPT 0xAB` as an ordinary `BKPT` and leaves the PC on the
+  instruction (it does not expose QEMU's semihosting switch), so the interrupt
+  handler recognises the trap by its immediate, services it and steps over it.
+  A `BKPT` with any other immediate still faults, and `semihosting=False`
+  disables the service.
+
+### Added — unclaimed-MMIO report
+
+- `MemoryController` now counts every MMIO access that no peripheral model
+  claimed, across the plain and bit-band paths, and exposes it through
+  `unclaimed_accesses()` and `show_unclaimed()`. Booting a firmware and reading
+  that list is the quickest way to find out which peripheral to implement next.
+
+### Added — documentation
+
+- `README.md` rewritten: what the project is, supported chips, install, quick
+  start, GDB, semihosting, serial bridges, testing and layout.
+- `docs/architecture.md` — how the layers fit together: chip descriptions,
+  three-level memory routing, the peripheral framework and its hooks, name
+  resolution, the interrupt engine, the GDB stub and the host backends.
+- `docs/add-a-chip.md` — a step-by-step guide to supporting a new MCU, with the
+  YAML field reference, a model template, the hook patterns and a checklist.
+- `docs/debugging.md` — logging, state inspection, GDB, serial bridges,
+  semihosting and a table of common failures.
+
 ### Changed — host serial integration
 
 - The SAM UART/SPI models no longer hard-depend on `socat`. The host side is now
