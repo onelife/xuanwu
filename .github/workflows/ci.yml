@@ -1,0 +1,67 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install socat (required by the SAM UART/SPI models)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y socat
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      # The tests import the package from src/ (see tests/conftest.py), so no
+      # install step is required to run them.
+      - name: Unit and conformance tests
+        run: pytest tests/unit tests/conformance -v
+
+      - name: Integration tests
+        run: pytest tests/integration -v
+
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the wheel in an isolated environment
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+
+      - name: The wheel must ship the chip and GDB descriptions
+        run: |
+          python - <<'PY'
+          import glob, zipfile
+          names = zipfile.ZipFile(glob.glob("dist/*.whl")[0]).namelist()
+          assert any(n.endswith(".yaml") for n in names), f"no chip descriptions in the wheel: {names}"
+          assert any(n.endswith(".xml") for n in names), f"no GDB descriptions in the wheel: {names}"
+          PY
+
+      - name: An installed xuanwu must work from any cwd
+        run: |
+          python -m pip install dist/*.whl
+          cd /tmp
+          python -c "import xuanwu; print('version', xuanwu.__version__)"
+          python -c "from xuanwu.chips import list_chips, resolve_chip; print('chips', list_chips()); assert resolve_chip('stm32f411').endswith('.yaml')"

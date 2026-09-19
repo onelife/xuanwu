@@ -1,2 +1,13 @@
 [tool.black]
 line-length = 119
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: end-to-end tests that load and execute a real firmware image",
+    "conformance: validates the chip description (YAML) files",
+    "slow: builds a wheel or otherwise takes more than a second",
+]
+filterwarnings = [
+    "ignore:pkg_resources is deprecated as an API:UserWarning",
+]
