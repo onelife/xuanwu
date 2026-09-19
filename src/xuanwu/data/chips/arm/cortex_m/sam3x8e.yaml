@@ -43,11 +43,11 @@ chip:
         base: 0xE000E000
         size: 0x10
         interrupt_lines: 7
-    - SYSTICK:  # system timer 
+    - SYSTICK:  # system timer
         type: core
         base: 0xE000E010
         size: 0x10
-        # step: 128
+        clock: 84000000  # core clock, Hz: feeds CALIB.TENMS and the time base
     - NVIC:  #  nested vectored interrupt controller
         type: core
         base: 0xE000E100
@@ -116,6 +116,9 @@ chip:
         #   tcp      - the simulator listens on peer_hint (tcp://host:port)
         #   loopback - in-memory, for tests
         bridge: auto
+        # The peripheral DMA controller for this UART is a second register window
+        # 0x100 bytes after the UART's own block (PTCR at 0x400E0920 is what the
+        # Arduino core writes to start a transfer), so it is declared separately.
         dma_base: 0x400E0900
         dma_size: 0x28
     - SPI:  # Serial peripheral interface

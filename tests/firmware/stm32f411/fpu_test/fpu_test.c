@@ -115,13 +115,15 @@ int main(void) {
 
     irq_count = 0;
     /*
-     * The simulator advances SysTick per executed instruction, and the chip
-     * description picks the step, so RVR is chosen large enough that the main
-     * line makes progress between interrupts.  A small RVR re-pends the
-     * interrupt on every instruction and the core tail-chains into the handler
-     * forever, never returning to thread mode.
+     * The simulator advances SysTick one instruction at a time (one cycle per
+     * instruction unless the chip description says otherwise), so RVR is chosen
+     * large enough that the main line makes progress between interrupts: a tiny
+     * RVR re-pends the interrupt on nearly every instruction and the core
+     * tail-chains into the handler forever, never returning to thread mode.
+     * 4096 cycles per period gives three interrupts well inside 20k
+     * instructions.
      */
-    SYSTICK_RVR = 0x80000;
+    SYSTICK_RVR = 0xFFF;
     SYSTICK_CVR = 0;
     SYSTICK_CSR = 0x7; /* enable | tickint | processor clock */
 

@@ -38,7 +38,7 @@ chip:
         type: core
         base: 0xE000E010
         size: 0x10
-        step: 128
+        clock: 100000000  # core clock, Hz: feeds CALIB.TENMS and the time base
     - NVIC:  #  nested vectored interrupt controller
         type: core
         base: 0xE000E100
