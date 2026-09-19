@@ -34,6 +34,7 @@ __all__ = [
     "SocatBridge",
     "TcpBridge",
     "LoopbackBridge",
+    "NullBridge",
     "create_bridge",
     "BRIDGE_KINDS",
 ]
@@ -349,20 +350,58 @@ class LoopbackBridge(SerialBridge):
         self.reset_output_buffer()
 
 
+class NullBridge(SerialBridge):
+    """A bridge with no host end.
+
+    Writes are accepted and discarded, nothing ever arrives.  Useful when a
+    device model owns the peripheral's byte stream (see :mod:`xuanwu.devices`),
+    or when a firmware's serial output is simply not interesting.
+    """
+
+    kind = "none"
+
+    def __init__(self, **_kwargs: Any) -> None:
+        """Accepts and ignores the options other bridges take (baudrate, prefix, ...)."""
+
+    @property
+    def peer_hint(self) -> str:
+        return "none"
+
+    @property
+    def in_waiting(self) -> int:
+        return 0
+
+    def read(self, size: int = 1) -> bytes:
+        return b""
+
+    def write(self, data: bytes) -> int:
+        return len(data)
+
+    def close(self) -> None:
+        pass
+
+
 BRIDGE_KINDS: Dict[str, Any] = {
     "socat": SocatBridge,
     "tcp": TcpBridge,
     "loopback": LoopbackBridge,
+    "none": NullBridge,
+    "null": NullBridge,
 }
 """Bridges that can be requested explicitly from the chip YAML."""
 
 
-def create_bridge(kind: str = "auto", **kwargs: Any) -> SerialBridge:
+def create_bridge(kind: Any = "auto", **kwargs: Any) -> SerialBridge:
     """Instantiate a bridge.
+
+    ``kind`` may also be an existing :class:`SerialBridge`, which is returned
+    unchanged -- that is how a device model takes over a peripheral's stream.
 
     ``"auto"`` uses ``socat`` when it is available and falls back to TCP, so the
     same chip description works on Linux, macOS and Windows.
     """
+    if isinstance(kind, SerialBridge):
+        return kind
     kind = (kind or "auto").lower()
     if kind == "auto":
         kind = "socat" if shutil.which("socat") else "tcp"

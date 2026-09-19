@@ -3,7 +3,7 @@
 """Serial peripheral interface."""
 
 from enum import IntEnum
-from typing import Any, Optional
+from typing import Any
 
 from ....backends import create_bridge
 from ....config import logger
@@ -100,17 +100,34 @@ class ArmSamSpi(ArmHardwareBase):
         """Where an external program should attach (a pty path, or tcp://host:port)."""
         return self._bridge.peer_hint
 
+    @property
+    def bridge(self):
+        """The other end of this peripheral's byte stream."""
+        return self._bridge
+
+    @bridge.setter
+    def bridge(self, bridge) -> None:
+        # Lets the device layer take over the bus (or hand it back).
+        previous = getattr(self, "_bridge", None)
+        if previous is not None:
+            previous.close()
+        self._bridge = bridge
+
     def fix_after_read(self, name: str, register: Register, data: int) -> int:
         # name_ = ".".join([self.NAME, name])
         if name == "SR":
-            sr = data
+            # RDRF/TXEMPTY/OVRES are derived from the byte stream, so they have to
+            # be merged into the value the guest reads -- and written back, so
+            # read_register("SR") agrees.  Returning `data` unmodified left RDRF
+            # permanently clear and hung any firmware polling for it.
+            sr = data | (1 << SPI_SR.TXEMPTY)
             if self._bridge.in_waiting > 0:
                 sr |= 1 << SPI_SR.RDRF
-            sr |= 1 << SPI_SR.TXEMPTY
-            if sr != data:
-                self.write_register("SR", data)
             if self._bridge.in_waiting > 1:
-                data |= 1 << SPI_SR.OVRES
+                sr |= 1 << SPI_SR.OVRES
+            if sr != data:
+                self.write_register("SR", sr)
+            data = sr
         elif name == "RDR":
             if self._bridge.in_waiting > 0:
                 # self._last_rx = int.from_bytes(self._bridge.read(self._bridge.in_waiting + 10)[-1], "little")

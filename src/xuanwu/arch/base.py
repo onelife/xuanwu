@@ -115,8 +115,14 @@ class ArmHardwareBase(ABC):
     def __setattr__(self, name: str, value: Any) -> None:
         if "registers" in self.__dict__ and name in self.__dict__["registers"]:
             return self.write_register(name, value)
-        else:
-            self.__dict__[name] = value
+        # Honour data descriptors (properties) declared on the class.  Writing
+        # straight into __dict__ would shadow them, so a property setter would
+        # silently never run -- which is how `peripheral.bridge = device` used to
+        # leave the old bridge in place.
+        descriptor = getattr(type(self), name, None)
+        if hasattr(descriptor, "__set__"):
+            return descriptor.__set__(self, value)
+        self.__dict__[name] = value
 
     @abstractmethod
     def reset(self):

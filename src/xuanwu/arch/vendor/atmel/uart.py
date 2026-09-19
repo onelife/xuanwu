@@ -3,7 +3,7 @@
 """Universal asynchronous receiver transceiver."""
 
 from enum import IntEnum
-from typing import Any, Optional
+from typing import Any
 
 from unicorn import Uc
 
@@ -95,6 +95,19 @@ class ArmSamUart(ArmHardwareBase):
     def peer_hint(self) -> str:
         """Where an external program should attach (a pty path, or tcp://host:port)."""
         return self._bridge.peer_hint
+
+    @property
+    def bridge(self):
+        """The other end of this peripheral's byte stream."""
+        return self._bridge
+
+    @bridge.setter
+    def bridge(self, bridge) -> None:
+        # Lets the device layer take over the line (or hand it back).
+        previous = getattr(self, "_bridge", None)
+        if previous is not None:
+            previous.close()
+        self._bridge = bridge
 
     def system_clock_callback(self, box: Uc, address: int, size: int, user_data: Any) -> None:
         cr = self.read_register("CR")

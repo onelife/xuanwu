@@ -122,7 +122,8 @@ chip:
         type: core
         base: 0x40008000
         size: 0xEC
-        bridge: auto
+        # The FLASH device below takes over this peripheral's byte stream.
+        bridge: none
     - PWM:  # pulse width modulation
         type: core
         base: 0x40094000
@@ -132,8 +133,18 @@ chip:
         base: 0x400AC800
         size: 0x34
 
-device:
-  port: SPI
-  cs:
-    port: GPIOC
-    pin: 26
+  # External devices wired to the peripherals above.  A device may hook GPIO
+  # pins and/or take over a peripheral's byte stream.
+  devices:
+    - name: LED
+      type: led
+      port: GPIOB
+      pin: 27
+    - name: FLASH
+      type: spi_flash
+      port: SPI
+      cs:
+        port: GPIOC
+        pin: 26
+        active_low: true
+      size: 0x100000
