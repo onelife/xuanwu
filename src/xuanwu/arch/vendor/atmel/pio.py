@@ -1,10 +1,16 @@
 # -*- coding: utf-8 -*-
 
-"""Parallel I/O controller (PIOA..PIOF)."""
+"""Parallel I/O controller (PIOA..PIOF).
+
+This is an *adapter*: the register layout, the write-one-to-set / write-one-to-clear
+pairs and the write-protection key live here; the level bookkeeping and the device
+notifications live in :class:`xuanwu.peripherals.gpio.GpioPort`.
+"""
 
 from typing import Any, Callable, Tuple, Union
 
 from ....config import logger
+from ....peripherals.gpio import GpioPort
 from ...base import ArmHardwareBase, Register
 
 __all__ = ["ArmSamGpio"]
@@ -71,85 +77,100 @@ class ArmSamGpio(ArmHardwareBase):
         ("WPSR", "I", 0x00000000),
     )
 
+    # The write-one-to-set / write-one-to-clear pairs, and what each side means.
+    SET_PAIRS = {
+        "PER": ("selection", True),
+        "OER": ("directions", True),
+        "PUER": ("pullups", True),
+        "OWER": ("opens", True),
+        "MDER": ("multi_drive", True),
+        "IFER": ("input_filter", True),
+    }
+    CLEAR_PAIRS = {
+        "PDR": ("selection", False),
+        "ODR": ("directions", False),
+        "PUDR": ("pullups", False),
+        "OWDR": ("opens", False),
+        "MDDR": ("multi_drive", False),
+        "IFDR": ("input_filter", False),
+    }
+
     def __init__(self, *args, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.NAME = self._name.upper()
         self._fix_after_read = self.fix_after_read
         self._fix_before_write = self.fix_before_write
-        self._hook = [set() for _ in range(32)]
+        self.port = GpioPort(self.NAME, width=32)
+
+    # -- what the device layer subscribes to -------------------------------
 
     def add_hook(self, pin: int, fn: Tuple[Union[Callable, None]]) -> None:
-        self._hook[pin].add((fn[0], fn[1]))
+        self.port.add_hook(pin, fn)
 
     def remove_hook(self, pin: int, fn: Tuple[Union[Callable, None]]) -> None:
-        self._hook[pin].remove((fn[0], fn[1]))
+        self.port.remove_hook(pin, fn)
 
     def reset(self):
         super().reset()
-        self.write_register("PSR", 0x0)
-        self.write_register("OSR", 0x0)
-        self.write_register("IFSR", 0x0)
-        self.write_register("ODSR", 0x0)
-        self.write_register("PDSR", 0x0)
-        self.write_register("IMR", 0x0)
-        self.write_register("ISR", 0x0)
-        self.write_register("MDSR", 0x0)
-        self.write_register("PUSR", 0x0)
-        self.write_register("ABSR", 0x0)
-        self.write_register("IFDGSR", 0x0)
-        self.write_register("SCDR", 0x0)
-        self.write_register("OWSR", 0x0)
-        self.write_register("AIMMR", 0x0)
-        self.write_register("ELSR", 0x0)
-        self.write_register("FRLHSR", 0x0)
-        self.write_register("LOCKSR", 0x0)
-        self.write_register("WPMR", 0x0)
-        self.write_register("WPSR", 0x0)
+        self.port.reset()
+        for name in (
+            "PSR", "OSR", "IFSR", "ODSR", "PDSR", "IMR", "ISR", "MDSR", "PUSR",
+            "ABSR", "IFDGSR", "SCDR", "OWSR", "AIMMR", "ELSR", "FRLHSR", "LOCKSR",
+            "WPMR", "WPSR",
+        ):
+            self.write_register(name, 0x0)
 
     def fix_after_read(self, name: str, register: Register, data: int) -> int:
         if name == "ISR":
             self.write_register(name, 0)
+        elif name == "PDSR":
+            # What the pins are actually at, including anything a device drives.
+            # PSR stays the stored mirror of PER: it says which pins the PIO
+            # peripheral controls, not the level they are at.
+            data = self.port.levels()
+            self.write_register("PDSR", data)
+        elif name == "ODSR":
+            data = self.port.outputs
+            self.write_register("ODSR", data)
         return data
 
     def fix_before_write(self, name: str, register: Register, data: int, data_orig: int) -> int:
         name_ = ".".join([self.NAME, name])
-        if name in ["PER", "OER", "IFER", "MDER", "PUDR", "OWER"]:
+        if name in self.SET_PAIRS or name in self.CLEAR_PAIRS:
             wpmr = self.read_register("WPMR")
-            if wpmr == 0x0:
-                reg = name[:-2] + "S" + name[-1:]
-                val = self.read_register(reg)
-                new_val = val | data
-                self.write_register(reg, new_val)
-                if name == "OER":
-                    diff = val ^ new_val
-                    for i in range(32):
-                        if diff & 0x01:
-                            logger.debug(f"[{name_:16s}]: Enable P{self.NAME[-1]}{i}")
-                        diff >>= 1
-            else:
+            if wpmr != 0x0:
                 logger.warning(f"[{name_:16s}]: Ignore write")
-            data = 0
-        elif name in ["PDR", "ODR", "IFDR", "MDDR", "PUER", "OWDR"]:
-            wpmr = self.read_register("WPMR")
-            if wpmr == 0x0:
-                reg = name[:-2] + "S" + name[-1:]
-                val = self.read_register(reg)
-                new_val = val & ~data
-                self.write_register(reg, new_val)
-                if name == "ODR":
-                    diff = val ^ new_val
-                    for i in range(32):
-                        if diff & 0x01:
-                            logger.debug(f"[{name_:16s}]: Disable P{self.NAME[-1]}{i}")
-                        diff >>= 1
-            else:
-                logger.warning(f"[{name_:16s}]: Ignore write")
+                return data_orig
+            attribute, enabled = (self.SET_PAIRS if name in self.SET_PAIRS else self.CLEAR_PAIRS)[name]
+            reg = name[:-2] + "S" + name[-1:]
+            val = self.read_register(reg)
+            new_val = (val | data) if name in self.SET_PAIRS else (val & ~data)
+            self.write_register(reg, new_val)
+            setattr(self.port, attribute, new_val & 0xFFFFFFFF)
             data = 0
         elif name == "ABSR":
             wpmr = self.read_register("WPMR")
             if wpmr != 0x0:
                 data = data_orig
                 logger.warning(f"[{name_:16s}]: Ignore write")
+            else:
+                self.port.peripheral_function = data
+        elif name == "SODR":
+            self.port.set_output_bits(data)
+            self.write_register("ODSR", self.port.outputs)
+            self.write_register("PDSR", self.port.levels())
+            data = 0
+        elif name == "CODR":
+            self.port.clear_output_bits(data)
+            self.write_register("ODSR", self.port.outputs)
+            self.write_register("PDSR", self.port.levels())
+            data = 0
+        elif name == "ODSR":
+            owsr = self.read_register("OWSR")
+            masked = (data & owsr) | (data_orig & ~owsr)
+            self.port.set_outputs(masked)
+            self.write_register("PDSR", self.port.levels())
+            data = masked
         elif name in ["IER", "AIMER"]:
             reg = name[:-2] + "M" + name[-1:]
             val = self.read_register(reg)
@@ -161,68 +182,6 @@ class ArmSamGpio(ArmHardwareBase):
             val = self.read_register(reg)
             val &= ~data
             self.write_register(reg, val)
-        elif name == "SODR":
-            reg = "ODSR"
-            val = self.read_register(reg)
-            new_val = val | data
-            self.write_register(reg, new_val)
-            # update PDSR
-            psr = self.read_register("PSR")
-            osr = self.read_register("OSR")
-            pdsr = self.read_register("PDSR")
-            mask = psr & osr
-            pdsr = (pdsr & ~mask) | (new_val & mask)
-            self.write_register("PDSR", pdsr)
-            data = 0
-            diff = val ^ new_val
-            for i in range(32):
-                if diff & 0x01:
-                    logger.debug(f"[{name_:16s}]: Set P{self.NAME[-1]}{i}")
-                    for hooks in self._hook[i]:
-                        if hooks[0]:
-                            _ = hooks[0]()
-                diff >>= 1
-        elif name == "CODR":
-            reg = "ODSR"
-            val = self.read_register(reg)
-            new_val = val & ~data
-            self.write_register(reg, new_val)
-            # update PDSR
-            psr = self.read_register("PSR")
-            osr = self.read_register("OSR")
-            pdsr = self.read_register("PDSR")
-            mask = psr & osr
-            pdsr = (pdsr & ~mask) | (new_val & mask)
-            self.write_register("PDSR", pdsr)
-            data = 0
-            diff = val ^ new_val
-            for i in range(32):
-                if diff & 0x01:
-                    logger.debug(f"[{name_:16s}]: Reset P{self.NAME[-1]}{i}")
-                    for hooks in self._hook[i]:
-                        if hooks[1]:
-                            _ = hooks[1]()
-                diff >>= 1
-        elif name == "ODSR":
-            owsr = self.read_register("OWSR")
-            data = (data & owsr) | (data_orig & ~owsr)
-            # update PDSR
-            psr = self.read_register("PSR")
-            osr = self.read_register("OSR")
-            pdsr = self.read_register("PDSR")
-            mask = psr & osr
-            pdsr = (pdsr & ~mask) | (data & mask)
-            self.write_register("PDSR", pdsr)
-            diff = data ^ data_orig
-            data_ = data
-            for i in range(32):
-                if diff & 0x01:
-                    if data_ & 0x01:
-                        logger.debug(f"[{name_:16s}]: Set P{self.NAME[-1]}{i}")
-                    else:
-                        logger.debug(f"[{name_:16s}]: Reset P{self.NAME[-1]}{i}")
-                diff >>= 1
-                data_ >>= 1
         elif name == "DIFSR":
             reg = "IFDGSR"
             val = self.read_register(reg)

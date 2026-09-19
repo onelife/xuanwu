@@ -1,12 +1,19 @@
 # -*- coding: utf-8 -*-
 
-"""Serial peripheral interface."""
+"""Serial peripheral interface.
+
+This is an *adapter*: the register layout and its bit meanings live here, the
+protocol lives in :class:`xuanwu.peripherals.bus.spi.SpiController`.  Everything the
+guest sees -- chip-select decoding, the status bits, the transmit/receive pair --
+is expressed in terms of that core.
+"""
 
 from enum import IntEnum
-from typing import Any
+from typing import Any, Optional
 
 from ....backends import create_bridge
 from ....config import logger
+from ....peripherals.bus.spi import SpiBus, SpiController
 from ...base import ArmHardwareBase, Register
 
 __all__ = ["ArmSamSpi"]
@@ -64,75 +71,88 @@ class ArmSamSpi(ArmHardwareBase):
         ("WPMR", "I", 0xFFFFFFFF),
         ("WPSR", "I", 0x00000000),
     )
-    def __init__(self, *args, **kwargs: Any) -> None:
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._npcs = 0xf
-        self._last_rx = 0
         self._fix_after_read = self.fix_after_read
         self._fix_before_write = self.fix_before_write
         # 'bridge' may be set in the chip YAML: auto | socat | tcp | loopback
-        self._bridge = create_bridge(
+        bridge = create_bridge(
             kwargs.get("bridge", "auto"),
             baudrate=kwargs.get("baudrate", 115200),
             prefix="spi",
         )
-        logger.info(f"Serial device (SPI): {self._bridge.peer_hint}")
+        self._core = SpiController(bus=bridge, channels=4)
+        logger.info(f"Serial device (SPI): {bridge.peer_hint}")
 
     def __del__(self):
-        bridge = getattr(self, "_bridge", None)
-        if bridge is not None:
-            bridge.close()
+        core = getattr(self, "_core", None)
+        # A device model on the bus (a flash chip, say) has nothing to close.
+        close = getattr(core.bus, "close", None) if core is not None else None
+        if close is not None:
+            close()
 
     def reset(self):
         super().reset()
+        self._core.reset()
         self.write_register("MR", 0x00000000)
         self.write_register("RDR", 0x00000000)
         self.write_register("SR", 0x00000000)
-        self.write_register("CSR0", 0x00000000)
-        self.write_register("CSR1", 0x00000000)
-        self.write_register("CSR2", 0x00000000)
-        self.write_register("CSR3", 0x00000000)
+        for channel in range(4):
+            self.write_register(f"CSR{channel}", 0x00000000)
         self.write_register("WPMR", 0x00000000)
         self.write_register("WPSR", 0x00000000)
+
+    # -- the device layer's view of the bus --------------------------------
 
     @property
     def peer_hint(self) -> str:
         """Where an external program should attach (a pty path, or tcp://host:port)."""
-        return self._bridge.peer_hint
+        return self._core.bus.peer_hint if self._core.bus is not None else "spi://none"
 
     @property
-    def bridge(self):
+    def bridge(self) -> Optional[SpiBus]:
         """The other end of this peripheral's byte stream."""
-        return self._bridge
+        return self._core.bus
 
     @bridge.setter
-    def bridge(self, bridge) -> None:
+    def bridge(self, bridge: Optional[SpiBus]) -> None:
         # Lets the device layer take over the bus (or hand it back).
-        previous = getattr(self, "_bridge", None)
+        previous = self._core.bus
         if previous is not None:
-            previous.close()
-        self._bridge = bridge
+            adopt = getattr(bridge, "adopt", None)
+            if adopt is not None:
+                # A bus that can host several devices keeps the old one as its
+                # fallback instead of having it closed under it.
+                adopt(previous)
+            else:
+                close = getattr(previous, "close", None)
+                if close is not None:
+                    close()
+        self._core.attach(bridge)
+
+    # -- register hooks ----------------------------------------------------
 
     def fix_after_read(self, name: str, register: Register, data: int) -> int:
         # name_ = ".".join([self.NAME, name])
         if name == "SR":
-            # RDRF/TXEMPTY/OVRES are derived from the byte stream, so they have to
-            # be merged into the value the guest reads -- and written back, so
-            # read_register("SR") agrees.  Returning `data` unmodified left RDRF
-            # permanently clear and hung any firmware polling for it.
-            sr = data | (1 << SPI_SR.TXEMPTY)
-            if self._bridge.in_waiting > 0:
+            # The status bits come from the core, which already fetched the answer
+            # to the last transfer -- firmware polls SR before *and* after every
+            # byte, so this is the hottest register of all.  The derived bits are
+            # replaced, not merged: leaving a stale RDRF behind makes a driver
+            # believe a byte is waiting when it has already been read.
+            derived = (1 << SPI_SR.RDRF) | (1 << SPI_SR.OVRES)
+            sr = (data & ~derived) | (1 << SPI_SR.TXEMPTY)
+            if self._core.data_available:
                 sr |= 1 << SPI_SR.RDRF
-            if self._bridge.in_waiting > 1:
+            if self._core.overrun:
                 sr |= 1 << SPI_SR.OVRES
             if sr != data:
                 self.write_register("SR", sr)
             data = sr
         elif name == "RDR":
-            if self._bridge.in_waiting > 0:
-                # self._last_rx = int.from_bytes(self._bridge.read(self._bridge.in_waiting + 10)[-1], "little")
-                self._last_rx = int.from_bytes(self._bridge.read(1), "little")
-            data = self._last_rx
+            data = self._core.take_response()
             mr = self.read_register("MR")
             if mr & (1 << SPI_MR.MSTR):
                 # Master mode: echo the PCS field along with the received data.
@@ -143,53 +163,45 @@ class ArmSamSpi(ArmHardwareBase):
         name_ = ".".join([self.NAME, name])
         if name == "CR":
             sr = self.read_register("SR")
-            # sr_orig = sr
             if data & (1 << SPI_CR.SPIDIS):
+                self._core.enabled = False
                 sr &= ~(1 << SPI_SR.SPIENS)
                 sr &= ~(1 << SPI_SR.TDRE)
             elif data & (1 << SPI_CR.SPIEN):
+                self._core.enabled = True
                 sr |= 1 << SPI_SR.SPIENS
                 sr |= 1 << SPI_SR.TDRE
             if data & (1 << SPI_CR.SWRST):
-                mr = self.read_register("MR")
-                mr &= ~(1 << SPI_MR.MSTR)
-                self.write_register("MR", mr)
+                self._core.reset()
+                # The reset leaves MR at zero, so the core has to be told as well:
+                # writing the register directly does not go through the hook above.
+                self._core.master = False
+                self._core.config = 0
+                self.write_register("MR", 0)
             if data & (1 << SPI_CR.LASTXFER):
                 self._npcs = 0xF
             self.write_register("SR", sr)
         elif name == "MR":
+            self._core.master = bool(data & (1 << SPI_MR.MSTR))
+            self._core.config = data
             if data & (1 << SPI_MR.PS) == 0x0:
-                pcs = (data >> SPI_MR.PCS) & 0xF
-                if data & (1 << SPI_MR.PCSDEC):
-                    self._npcs = pcs
-                elif pcs & 0x1 == 0x0:
-                    self._npcs = 0xE
-                elif pcs & 0x3 == 0x1:
-                    self._npcs = 0xD
-                elif pcs & 0x7 == 0x3:
-                    self._npcs = 0xB
-                elif pcs & 0xf == 0x7:
-                    self._npcs = 0x7
+                self._npcs = self._decode_pcs(data)
         elif name == "TDR":
             mr = self.read_register("MR")
             if mr & (1 << SPI_MR.PS):
-                pcs = (data >> SPI_MR.PCS) & 0xF
-                if mr & (1 << SPI_MR.PCSDEC):
-                    self._npcs = pcs
-                elif pcs & 0x1 == 0x0:
-                    self._npcs = 0xE
-                elif pcs & 0x3 == 0x1:
-                    self._npcs = 0xD
-                elif pcs & 0x7 == 0x3:
-                    self._npcs = 0xB
-                elif pcs & 0xf == 0x7:
-                    self._npcs = 0x7
+                self._npcs = self._decode_pcs(data)
                 if data & (1 << SPI_CR.LASTXFER):
                     self._npcs = 0xF
-            # else:
-            #     pcs = (mr >> SPI_MR.PCS) & 0xF
-            self._bridge.write((data & 0xFF).to_bytes(1, "little"))
-            # logger.debug(f'[{name_:16s}]: Output "{(data & 0xFF).to_bytes(1, "little")}"')
+            self._core.transfer(data & 0xFF)
+        elif name.startswith("CSR"):
+            wpmr = self.read_register("WPMR")
+            if wpmr != 0x0:
+                data = data_orig
+                logger.warning(f"[{name_:16s}]: Ignore write")
+            else:
+                channel = int(name[3:])
+                if 0 <= channel < self._core.channels:
+                    self._core.csr[channel] = data
         elif name in ["IER"]:
             reg = name[:-2] + "M" + name[-1:]
             val = self.read_register(reg)
@@ -201,11 +213,6 @@ class ArmSamSpi(ArmHardwareBase):
             val = self.read_register(reg)
             new_val = val & ~data
             self.write_register(reg, new_val)
-        elif name.startswith("CSR"):
-            wpmr = self.read_register("WPMR")
-            if wpmr != 0x0:
-                data = data_orig
-                logger.warning(f"[{name_:16s}]: Ignore write")
         elif name == "WPMR":
             if (data & 0xFFFFFF00) != 0x53504900:
                 logger.warning(f"[{name_:16s}]: Invalid WPKEY, 0x{data:08x}")
@@ -213,3 +220,17 @@ class ArmSamSpi(ArmHardwareBase):
             else:
                 data &= 0x01
         return data
+
+    @staticmethod
+    def _decode_pcs(data: int) -> int:
+        """Turn the PCS field of MR/TDR into the NPCS mask it selects."""
+        pcs = (data >> SPI_MR.PCS) & 0xF
+        if pcs & 0x1 == 0x0:
+            return 0xE
+        if pcs & 0x3 == 0x1:
+            return 0xD
+        if pcs & 0x7 == 0x3:
+            return 0xB
+        if pcs & 0xF == 0x7:
+            return 0x7
+        return 0xF
