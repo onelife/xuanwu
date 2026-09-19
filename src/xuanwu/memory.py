@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 
 # from os import path, fstat
+import ctypes
+import mmap
 from collections import namedtuple
 from struct import Struct
 from typing import Optional, Any, Dict, List, Tuple, Iterator, Callable
@@ -14,6 +16,9 @@ from .exception import XwInvalidParameter, XwInvalidMemoryAddress, XwInvalidMemo
 
 
 __all__ = ["MemoryController"]
+
+PAGE = 4096
+"""Host page size a ``mem_map_ptr`` buffer has to be aligned to."""
 
 
 MemoryInfo = namedtuple("Memory", ["start", "end", "perms", "buffer", "desc"])
@@ -138,6 +143,15 @@ class MemoryController(object):
         perms: Optional[int] = UC_PROT_ALL,
         desc: Optional[str] = None,
     ) -> None:
+        """Map guest memory, backed by a host buffer.
+
+        Backing it with host memory (``mem_map_ptr``) rather than letting Unicorn
+        allocate is what makes ``remap`` free: the alias is the *same* bytes, so reads
+        and writes through either address cost nothing on the host.  That matters on the
+        SAM3X8E, where the Due's linker script puts the stack and heap in SRAM0's remap
+        window -- forwarding callbacks there cost about a microsecond per access, which
+        an ordinary firmware pays thousands of times per millisecond.
+        """
         # check parameters
         if address < 0:
             raise XwInvalidParameter(f"Invalid memory address: {address}")
@@ -150,8 +164,9 @@ class MemoryController(object):
             raise XwInvalidMemoryAddress(f"Already mapped memory address: 0x{address:08X} (0x{size:08X})")
         # do map and add entry
         logger.debug(f"map: 0x{address:08x} (0x{size:08x}) [{desc}]")
-        self._box.mem_map(address, size, perms)
-        self._registry.append(MemoryInfo(address, address + size, perms, None, desc or "Mapped"))
+        buffer = mmap.mmap(-1, max(PAGE, -(-size // PAGE) * PAGE))
+        self._box.mem_map_ptr(address, size, perms, ctypes.addressof(ctypes.c_char.from_buffer(buffer)))
+        self._registry.append(MemoryInfo(address, address + size, perms, buffer, desc or "Mapped"))
 
     def map_with_callback(
         self,
@@ -205,6 +220,14 @@ class MemoryController(object):
         perms: Optional[int] = UC_PROT_ALL,
         desc: Optional[str] = None,
     ) -> None:
+        """Point a second address range at the same memory.
+
+        When the source is host-backed (an ordinary ``type: memory`` region) the alias
+        maps the *same* host buffer, so both addresses see each other's writes and
+        neither costs a callback.  A region that is already a callback window (a
+        peripheral's bit-band area) is forwarded instead, which is slower but keeps the
+        two views coherent.
+        """
         records = self.get_map(source, source + size)
         if not records:
             raise XwInvalidMemoryAddress(f"Unmapped memory address: 0x{source:08X} (0x{size:08X})")
@@ -215,6 +238,18 @@ class MemoryController(object):
             size = size_
         elif size != size_:
             raise XwInvalidMemorySize(f"Remap size mismatch: 0x{size:08X}, 0x{size_:08X}")
+        record = records[0]
+        if isinstance(record.buffer, mmap.mmap) and record.buffer is not None:
+            if self.get_map(target, target + size):
+                raise XwInvalidMemoryAddress(f"Already mapped memory address: 0x{target:08X} (0x{size:08X})")
+            logger.debug(f"remap: 0x{target:08x} -> 0x{source:08x} (0x{size:08x}) [{desc or record.desc}]")
+            self._box.mem_map_ptr(
+                target, size, record.perms, ctypes.addressof(ctypes.c_char.from_buffer(record.buffer))
+            )
+            self._registry.append(
+                MemoryInfo(target, target + size, record.perms, record.buffer, f"{record.desc} (Remap)")
+            )
+            return
         self.map_with_callback(
             target,
             size,
