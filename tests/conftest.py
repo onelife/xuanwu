@@ -28,6 +28,9 @@ FIRMWARE_CONFIG = REPO_ROOT / "tests" / "firmware" / "board.yaml"
 CHIPS = {
     "stm32f411": CHIP_DIR / "stm32f411.yaml",
     "sam3x8e": CHIP_DIR / "sam3x8e.yaml",
+    # The Due with the Adafruit 2.8" TFT Touch Shield v2 on it: one overlay file that
+    # includes the part above and adds the panel (and, later, the touch controller).
+    "sam3x8e_tft": CHIP_DIR / "sam3x8e_tft.yaml",
 }
 
 # Fallback for images that board.yaml does not declare (hand-written firmware such
@@ -153,6 +156,12 @@ def sam3x8e_path() -> Path:
 
 
 @pytest.fixture(scope="session")
+def sam3x8e_tft_path() -> Path:
+    """The Due with the Adafruit 2.8" TFT Touch Shield v2 declared on it."""
+    return CHIPS["sam3x8e_tft"]
+
+
+@pytest.fixture(scope="session")
 def stm32f411_firmware() -> Path:
     """A firmware that needs no serial bridge, so it runs on any platform."""
     return find_firmware("Blink_m4.ino.elf")
@@ -162,6 +171,18 @@ def stm32f411_firmware() -> Path:
 def sam3x8e_firmware() -> Path:
     """A SAM3X firmware that prints over its UART (needs the socat bridge)."""
     return find_firmware("Blink_uart_m3.ino.elf")
+
+
+@pytest.fixture(scope="session")
+def due_tft_smoke_firmware() -> Path:
+    """The Adafruit libraries on a handful of known shapes (see tests/firmware/)."""
+    return find_firmware("Tft_smoke_m3.ino.elf")
+
+
+@pytest.fixture(scope="session")
+def due_tft_firmware() -> Path:
+    """Adafruit's graphicstest, which draws megabytes of pixels."""
+    return find_firmware("graphicstest_due_tft.ino.elf")
 
 
 @pytest.fixture(scope="session")

@@ -13,6 +13,7 @@ import pytest
 
 from xuanwu import XuanWu
 from xuanwu.devices import SpiFlash
+from xuanwu.peripherals.bus.spi import SpiBusSelector
 
 pytestmark = pytest.mark.integration
 
@@ -40,6 +41,17 @@ def device(sam3x8e_path, sam3x8e_firmware):
     return device
 
 
+@pytest.fixture(autouse=True)
+def clean_transaction(device):
+    """Leave no half-finished command behind for the next test.
+
+    The device is module-scoped for speed, and a flash that is still holding a command
+    (or an answer nobody clocked out) would make the next test read its leftovers.
+    """
+    yield
+    device.dev["FLASH"].reset()
+
+
 def cs_low(device) -> None:
     """Assert chip select (active low)."""
     device.hw.perif["gpioc"].write(GPIOC_BASE + PIO_CODR, 4, 1 << CS_PIN)
@@ -56,6 +68,21 @@ def send(device, values) -> None:
         spi.write(SPI_TDR, 4, value)
 
 
+def exchange(device, values) -> bytes:
+    """What ``SPIClass::transfer()`` does: send a byte, read the byte shifted in.
+
+    The answer to a byte a device does not reply to is the idle level (0xFF), and a
+    driver always reads it -- which is why the tests below index into the result rather
+    than expecting the interesting byte to be the first one available.
+    """
+    spi = device.hw.perif["spi"]
+    answer = bytearray()
+    for value in values:
+        spi.write(SPI_TDR, 4, value)
+        answer.append(spi.read(SPI_RDR, 4) & 0xFF)
+    return bytes(answer)
+
+
 def receive(device, count: int) -> bytes:
     spi = device.hw.perif["spi"]
     return bytes(spi.read(SPI_RDR, 4) & 0xFF for _ in range(count))
@@ -66,10 +93,12 @@ class TestLoading:
         assert device.dev.names() == ["LED", "FLASH"]
         assert len(device.dev) == 2
 
-    def test_the_flash_owns_the_spi_bus(self, device):
+    def test_the_flash_is_on_the_spi_bus(self, device):
         flash = device.dev["FLASH"]
         assert isinstance(flash, SpiFlash)
-        assert device.hw.perif["spi"].bridge is flash
+        bus = device.hw.perif["spi"].bridge
+        assert isinstance(bus, SpiBusSelector), "an SPI bus a board can add devices to"
+        assert bus.device_at("FLASH") is flash
         assert flash.attached is True
 
     def test_devices_can_be_looked_up_by_name(self, device):
@@ -96,44 +125,47 @@ class TestLoading:
 class TestSpiFlashOnTheBus:
     def test_jedec_id(self, device):
         cs_low(device)
-        send(device, [0x9F])
-        assert receive(device, 3) == bytes([0xEF, 0x40, 0x18])
+        answer = exchange(device, [0x9F, 0x00, 0x00, 0x00])
         cs_high(device)
+        # The first byte answers the command byte itself, which a flash does not reply
+        # to, so it is the idle level; the identification follows.
+        assert answer[0] == 0xFF
+        assert answer[1:] == bytes([0xEF, 0x40, 0x18])
 
     def test_status_starts_clear_then_write_enable(self, device):
         cs_low(device)
-        send(device, [0x05])
-        assert receive(device, 1) == b"\x00"
+        assert exchange(device, [0x05, 0x00])[1] == 0x00
         cs_high(device)
 
         cs_low(device)
-        send(device, [0x06])
+        exchange(device, [0x06])  # write enable
         cs_high(device)
 
         cs_low(device)
-        send(device, [0x05])
-        assert receive(device, 1) == b"\x02"
+        assert exchange(device, [0x05, 0x00])[1] == 0x02
         cs_high(device)
 
     def test_program_and_read_back(self, device):
         flash = device.dev["FLASH"]
 
         cs_low(device)
-        send(device, [0x06])  # write enable
+        exchange(device, [0x06])  # write enable
         cs_high(device)
 
         cs_low(device)
-        send(device, [0x02, 0x00, 0x00, 0x40])  # page program at 0x40
-        send(device, b"xuanwu")
+        exchange(device, [0x02, 0x00, 0x00, 0x40])  # page program at 0x40
+        exchange(device, b"xuanwu")
         cs_high(device)
 
         assert flash.read_memory(0x40, 6) == b"xuanwu"
 
         cs_low(device)
-        send(device, [0x03, 0x00, 0x00, 0x40])
-        send(device, b"\x00" * 6)  # clock the data out
-        assert receive(device, 6) == b"xuanwu"
+        # One extra clock: a shift register answers the byte *after* the one it is
+        # reacting to, so reading n bytes takes n+1 transfers -- which is why drivers
+        # clock a dummy byte first.
+        answer = exchange(device, [0x03, 0x00, 0x00, 0x40] + [0x00] * 7)
         cs_high(device)
+        assert answer[5:11] == b"xuanwu"
 
     def test_the_receive_flag_is_visible_to_the_guest(self, device):
         """SR.RDRF used to be computed and then thrown away, hanging polling code."""
@@ -141,20 +173,19 @@ class TestSpiFlashOnTheBus:
         send(device, [0x9F])
         status = device.hw.perif["spi"].read(SPI_SR, 4)
         assert status & (1 << RDRF), "RDRF must be set while a byte is waiting"
-        receive(device, 3)
+        exchange(device, [0x00, 0x00, 0x00])  # clock the identification out
         cs_high(device)
 
     def test_chip_select_delimits_transactions(self, device):
         """Two commands in a row are only separated by CS, so this must not leak."""
         cs_low(device)
-        send(device, [0x9F])
-        assert receive(device, 3) == bytes([0xEF, 0x40, 0x18])
+        assert exchange(device, [0x9F, 0x00, 0x00, 0x00])[1:] == bytes([0xEF, 0x40, 0x18])
         cs_high(device)
 
         cs_low(device)
-        send(device, [0x05])  # a fresh transaction: a new command
-        assert receive(device, 1) == b"\x00"
+        answer = exchange(device, [0x05, 0x00])  # a fresh transaction: a new command
         cs_high(device)
+        assert answer[1] == 0x00
 
 
 class TestLedOnAPin:

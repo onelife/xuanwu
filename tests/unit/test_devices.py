@@ -33,8 +33,8 @@ def context(**peripherals) -> DeviceContext:
 
 class TestRegistry:
     def test_known_types(self):
-        assert device_types() == ["led", "spi_flash"]
-        assert set(BUILDIN) == {"led", "spi_flash"}
+        assert device_types() == ["ili9341", "led", "spi_flash"]
+        assert set(BUILDIN) == {"ili9341", "led", "spi_flash"}
 
     def test_missing_type_is_rejected(self):
         from xuanwu.devices import create_device

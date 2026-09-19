@@ -41,7 +41,7 @@ class Led(Device):
         self._gpio = None
 
     def attach(self, ctx: DeviceContext) -> None:
-        self._gpio = ctx.peripheral(self.port)
+        self._gpio = ctx.gpio(self.port)
         self._gpio.add_hook(self.pin, (self._on_high, self._on_low))
         self.attached = True
         logger.info(f"[{self.name:8s}]: LED on {self.port}.{self.pin}")

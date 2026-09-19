@@ -1,0 +1,38 @@
+chip:
+  name: sam3x8e_tft
+  include: sam3x8e.yaml
+  #
+  # An Arduino Due with an Adafruit 2.8" TFT Touch Shield v2 on it.
+  #
+  # The shield is three devices on two buses, and the pins below are the *Arduino*
+  # pin numbers the library uses, translated through the Due's variant table:
+  #
+  #   D9  = PC21   panel data/command   (PC21, PWML4)
+  #   D10 = PC29   panel chip select    (PC29, TIOB7)
+  #   D4  = PC26   microSD chip select  (the base description's FLASH device)
+  #   D20 = PB12, D21 = PB13   the Due's Wire (TWI1 at 0x40090000)
+  #
+  # Note that the Due's Arduino numbering is not the port bit: D9 is PC21 and D10 is
+  # PC29, while PD9/PD10 are Arduino pins 30 and 32.  Getting that wrong is silent --
+  # the firmware writes a port nobody is watching and the panel simply never answers.
+  #
+  # Both SPI devices are on the same controller, so the SPI port is shared: each device
+  # is selected by its own GPIO pin (see xuanwu.peripherals.bus.spi.SpiBusSelector).
+  #
+  # The map itself (peripherals, memory, the base flash device) comes from
+  # sam3x8e.yaml through `include:`.
+  #
+  devices:
+    - name: LCD
+      type: ili9341
+      port: SPI
+      cs:
+        port: GPIOC
+        pin: 29
+        active_low: true
+      dc:
+        port: GPIOC
+        pin: 21
+      # headless keeps the framebuffer for tests and dumps a PNG on request; use
+      # `viewer: pygame` (pip install 'xuanwu[gui]') to actually watch it.
+      viewer: headless

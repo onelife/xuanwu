@@ -92,7 +92,7 @@ class SpiFlash(Device, SerialBridge):
         self._rx = bytearray()
         self._lock = threading.RLock()
         self._peripheral = None
-        self._gpio = None
+        self._bus = None
         self._cs_pin: Optional[int] = None
         self._cs_active_low = True
 
@@ -109,16 +109,20 @@ class SpiFlash(Device, SerialBridge):
     # -- Device ----------------------------------------------------------
 
     def attach(self, ctx: DeviceContext) -> None:
-        peripheral = ctx.peripheral(self.port)
-        peripheral.bridge = self  # take over the bus
-        self._peripheral = peripheral
-
+        self._peripheral = ctx.peripheral(self.port)
         if self.cs:
-            self._gpio = ctx.peripheral(self.cs["port"])
+            port = ctx.gpio(self.cs["port"])
             self._cs_pin = int(self.cs["pin"])
             self._cs_active_low = bool(self.cs.get("active_low", True))
-            self._gpio.add_hook(self._cs_pin, (self._on_cs_high, self._on_cs_low))
+            # Every SPI device with a chip select joins the shared bus, even when it is
+            # the only one on it: a board may add a second device later, and the bus is
+            # what keeps them apart and tells each one when its transaction starts.
+            self._bus = ctx.spi_bus(self.port)
+            self._bus.add(
+                self.name, self, gpio=port, pin=self._cs_pin, active_low=self._cs_active_low
+            )
         else:
+            self._peripheral.bridge = self  # nothing to share: take the byte stream
             logger.warning(
                 f"[{self.name:8s}]: no 'cs' pin configured -- transactions cannot be delimited, "
                 "so consecutive commands will run together"
@@ -129,9 +133,9 @@ class SpiFlash(Device, SerialBridge):
         logger.info(f"[{self.name:8s}]: SPI flash on {self.port}, 0x{self.size:x} bytes{chip_select}")
 
     def detach(self) -> None:
-        if self._gpio is not None and self._cs_pin is not None:
-            self._gpio.remove_hook(self._cs_pin, (self._on_cs_high, self._on_cs_low))
-        self._gpio = None
+        if self._bus is not None:
+            self._bus.remove(self.name)
+        self._bus = None
         self._peripheral = None
         super().detach()
 
@@ -146,12 +150,6 @@ class SpiFlash(Device, SerialBridge):
             self._rx.clear()
 
     # -- chip select -----------------------------------------------------
-
-    def _on_cs_high(self) -> None:
-        self.select(not self._cs_active_low)
-
-    def _on_cs_low(self) -> None:
-        self.select(self._cs_active_low)
 
     def select(self, active: bool) -> None:
         """Assert or release chip select, delimiting one transaction.

@@ -9,9 +9,10 @@ hook GPIO pins and take over a peripheral's byte stream.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Dict
 
 from ..exception import XwUnknownHardware
+from ..peripherals.bus.spi import SpiBusSelector
 
 __all__ = ["Device", "DeviceContext"]
 
@@ -24,6 +25,7 @@ class DeviceContext:
         self.reg = reg
         self.mem = mem
         self.hw = hw
+        self._spi_buses: Dict[str, SpiBusSelector] = {}
 
     def peripheral(self, name: str) -> Any:
         """Return a core peripheral model by its chip-description name."""
@@ -32,6 +34,38 @@ class DeviceContext:
             known = ", ".join(sorted(self.hw.perif)) or "none"
             raise XwUnknownHardware(f"No peripheral {name!r} on this chip (have: {known})")
         return self.hw.perif[key]
+
+    def gpio(self, name: str) -> Any:
+        """The pin-level view of a GPIO port.
+
+        A device cares about pins, not about the registers an adapter keeps them in, so
+        this hands back the behaviour core (:class:`xuanwu.peripherals.gpio.GpioPort`)
+        when the vendor adapter has one.  An adapter that is still register-only is
+        returned as it is, which is what a device would have got anyway.
+        """
+        peripheral = self.peripheral(name)
+        return getattr(peripheral, "port", peripheral)
+
+    def spi_bus(self, port: str) -> SpiBusSelector:
+        """The shared bus on an SPI port, created on first use.
+
+        Devices that share a bus -- a display and an SD socket on one controller, each
+        with its own chip select -- register with this instead of taking the
+        peripheral's byte stream for themselves.  The bus the controller was using
+        before (a host bridge, say) is kept as the fallback for unselected traffic.
+        """
+        peripheral = self.peripheral(port)
+        existing = self._spi_buses.get(port.lower())
+        if existing is not None:
+            return existing
+        bridge = peripheral.bridge
+        if isinstance(bridge, SpiBusSelector):
+            self._spi_buses[port.lower()] = bridge
+            return bridge
+        selector = SpiBusSelector(fallback=bridge)
+        peripheral.bridge = selector  # the adapter hands the old bus to the selector
+        self._spi_buses[port.lower()] = selector
+        return selector
 
 
 class Device(ABC):

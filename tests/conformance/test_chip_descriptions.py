@@ -4,12 +4,16 @@
 
 Adding a new MCU should be a YAML-only change; these tests make malformed or
 inconsistent descriptions fail in seconds instead of at simulation time.
+
+A description that builds on another one with ``include:`` is checked *merged*, which is
+what the simulator runs: a board overlay that forgot to inherit the part's peripherals
+would otherwise pass these checks vacuously.
 """
 
-import yaml
 import pytest
 
 from xuanwu.arch.cortex_m import ArmHardwareController
+from xuanwu.chips import load_chip_document
 from xuanwu.xuanwu import ARCH_MAPPING, MODE_MAPPING
 
 pytestmark = pytest.mark.conformance
@@ -21,8 +25,7 @@ BITBAND_WORDS = 32  # 32 bits per word on the 32-bit parts modelled so far
 
 
 def load(chip_yaml):
-    with open(chip_yaml, encoding="utf-8") as file:
-        doc = yaml.safe_load(file)
+    doc = load_chip_document(str(chip_yaml))
     assert "chip" in doc, f"{chip_yaml.name} has no 'chip' root key"
     return doc["chip"]
 

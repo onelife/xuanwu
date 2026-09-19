@@ -6,12 +6,14 @@ from typing import Any, Dict, List
 
 from ..exception import XwInvalidParameter, XwUnknownHardware
 from .base import Device, DeviceContext
+from .display import Ili9341Device
 from .led import Led
 from .spi_flash import SpiFlash, SpiFlashCommand
 
 __all__ = [
     "Device",
     "DeviceContext",
+    "Ili9341Device",
     "Led",
     "SpiFlash",
     "SpiFlashCommand",
@@ -23,6 +25,7 @@ __all__ = [
 BUILDIN: Dict[str, Any] = {
     "led": Led,
     "spi_flash": SpiFlash,
+    "ili9341": Ili9341Device,
 }
 """Device models keyed by the ``type`` used in the chip description."""
 
