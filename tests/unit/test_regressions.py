@@ -145,6 +145,43 @@ class TestRunHonoursTheInstructionBudget:
         assert device.reg.pc == self.CODE + 6
 
 
+class TestNvicRegisterTableIsPerInstance:
+    """``ArmHardwareNvic.REGISTERS`` was a class attribute rewritten in ``__init__``.
+
+    Each instance did build its own table, but the class attribute was left
+    pointing at whichever table was built last, so an already-created controller
+    reported the wrong register list as soon as a second one existed.
+    """
+
+    def make(self, chip_path, firmware, **options):
+        from xuanwu import XuanWu
+
+        return XuanWu(str(chip_path), str(firmware), hardware_options=options or None)
+
+    def test_two_controllers_keep_their_own_table(self, stm32f411_path, stm32f411_firmware):
+        from xuanwu.arch.cortex_m import ArmHardwareNvic
+
+        wide = self.make(stm32f411_path, stm32f411_firmware)
+        narrow = self.make(stm32f411_path, stm32f411_firmware, interrupt_lines=1, priority_bits=2)
+
+        wide_nvic = wide.hw.perif["nvic"]
+        narrow_nvic = narrow.hw.perif["nvic"]
+        assert len(wide_nvic.registers) != len(narrow_nvic.registers)
+        # REGISTERS must describe the same table as the built register file, for
+        # both instances, at the same time.
+        assert len(wide_nvic.REGISTERS) == len(wide_nvic.registers)
+        assert len(narrow_nvic.REGISTERS) == len(narrow_nvic.registers)
+        assert ArmHardwareNvic.REGISTERS == (), "no table may be cached on the class"
+
+    def test_the_priority_mask_follows_priority_bits(self, stm32f411_path, stm32f411_firmware):
+        device = self.make(stm32f411_path, stm32f411_firmware, priority_bits=2)
+        nvic = device.hw.perif["nvic"]
+        # NVIC_IPR0 holds four priority bytes; with two implemented bits each,
+        # writing all ones must read back as 0xFC per byte.
+        nvic.write(0xE000E400, 4, 0xFFFF_FFFF)
+        assert nvic.read(0xE000E400, 4) == 0xFCFC_FCFC
+
+
 class TestErrorMessagesInterpolate:
     """Several raise sites were missing the f prefix, printing literal {name}."""
 

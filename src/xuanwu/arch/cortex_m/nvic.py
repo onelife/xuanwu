@@ -15,7 +15,10 @@ class ArmHardwareNvic(ArmHardwareBase):
     """nested vectored interrupt controller"""
 
     NAME = "NVIC"
-    REGISTERS = tuple()
+    # The register table depends on ``interrupt_lines``/``priority_bits``, so it
+    # is expanded per instance from this template.  It used to be assigned to the
+    # class from __init__, which made two chips with different line counts in one
+    # process overwrite each other's table.
     REGISTERS_TEMPLATE = (
         # Interrupt Set-enable Registers
         ("ISER{0}", "I", 0xFFFFFFFF),
@@ -38,20 +41,23 @@ class ArmHardwareNvic(ArmHardwareBase):
     def __init__(self, *args, **kwargs: Any) -> None:
         line_num = kwargs.get("interrupt_lines", 7) + 1
         priority_bits = kwargs.get("priority_bits", 4)
-        # fix IPR mask
-        mask_ = ~((1 << priority_bits) - 1) & 0xFF
+        # fix IPR mask: only the top `priority_bits` of each priority byte exist.
+        # (The loop below used to reuse the name `mask` for the template's own
+        # mask, so this value was computed and then thrown away.)
+        priority_mask = ~((1 << priority_bits) - 1) & 0xFF
         mask = 0
         for _ in range(4):
-            mask = (mask << 8) | mask_
+            mask = (mask << 8) | priority_mask
         REGS = []
-        for name, fmt, mask in ArmHardwareNvic.REGISTERS_TEMPLATE:
+        for name, fmt, write_mask in ArmHardwareNvic.REGISTERS_TEMPLATE:
             if name.startswith("RESERVED"):
-                REGS.extend([(name, fmt.format(32 - line_num), mask)])
+                REGS.extend([(name, fmt.format(32 - line_num), write_mask)])
             elif name.startswith("IPR"):
                 REGS.extend([(name.format(x), fmt, mask) for x in range((line_num * 32 - 16) // 4)])
             else:
-                REGS.extend([(name.format(x), fmt, mask) for x in range(line_num)])
-        ArmHardwareNvic.REGISTERS = tuple(REGS)
+                REGS.extend([(name.format(x), fmt, write_mask) for x in range(line_num)])
+        # instance attribute: ArmHardwareBase.__init__ reads it through self
+        self.REGISTERS = tuple(REGS)
         super().__init__(*args, **kwargs)
         self._fix_after_read = self.fix_after_read
         self._fix_before_write = self.fix_before_write
