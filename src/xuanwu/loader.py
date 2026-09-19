@@ -3,7 +3,6 @@
 from os import path
 from typing import Optional, Any
 
-from .config import logger
 from .memory import MemoryController
 from .exception import XwInvalidParameter, XwInvalidCodeFile
 

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .default import *
 from .constant import *
+from .default import LOGGING_CONFIG  # imported by name: the star import hides typos
 
 DEBUG = os.environ.get("DEBUG", "0") == "1"
 """Debug mode switch."""

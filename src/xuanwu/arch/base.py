@@ -10,11 +10,10 @@ register file with per-access fix hooks.
 from abc import ABC, abstractmethod
 from collections import OrderedDict, namedtuple
 from struct import Struct
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Optional
 
 from unicorn import Uc
 from unicorn import arm_const as uc_arm
-from unicorn.arm_const import *
 
 from ..config import logger
 from ..exception import XwInvalidMemoryAddress, XwInvalidMemorySize
@@ -27,39 +26,39 @@ __all__ = ["arm_core_registers", "arm_context_registers", "Register", "IrqOp", "
 
 arm_core_registers = {
     # Arm core
-    "r0": UC_ARM_REG_R0,
-    "r1": UC_ARM_REG_R1,
-    "r2": UC_ARM_REG_R2,
-    "r3": UC_ARM_REG_R3,
-    "r4": UC_ARM_REG_R4,
-    "r5": UC_ARM_REG_R5,
-    "r6": UC_ARM_REG_R6,
-    "r7": UC_ARM_REG_R7,
-    "r8": UC_ARM_REG_R8,
-    "r9": UC_ARM_REG_R9,
-    "r10": UC_ARM_REG_R10,
-    "r11": UC_ARM_REG_R11,
-    "r12": UC_ARM_REG_R12,
-    "sp": UC_ARM_REG_SP,  # stack pointer
-    "lr": UC_ARM_REG_LR,  # link register
-    "pc": UC_ARM_REG_PC,  # program counter
+    "r0": uc_arm.UC_ARM_REG_R0,
+    "r1": uc_arm.UC_ARM_REG_R1,
+    "r2": uc_arm.UC_ARM_REG_R2,
+    "r3": uc_arm.UC_ARM_REG_R3,
+    "r4": uc_arm.UC_ARM_REG_R4,
+    "r5": uc_arm.UC_ARM_REG_R5,
+    "r6": uc_arm.UC_ARM_REG_R6,
+    "r7": uc_arm.UC_ARM_REG_R7,
+    "r8": uc_arm.UC_ARM_REG_R8,
+    "r9": uc_arm.UC_ARM_REG_R9,
+    "r10": uc_arm.UC_ARM_REG_R10,
+    "r11": uc_arm.UC_ARM_REG_R11,
+    "r12": uc_arm.UC_ARM_REG_R12,
+    "sp": uc_arm.UC_ARM_REG_SP,  # stack pointer
+    "lr": uc_arm.UC_ARM_REG_LR,  # link register
+    "pc": uc_arm.UC_ARM_REG_PC,  # program counter
     # Armv7-M
-    "msp": UC_ARM_REG_MSP,  # main stack pointer
-    "psp": UC_ARM_REG_PSP,  # process stack pointer
+    "msp": uc_arm.UC_ARM_REG_MSP,  # main stack pointer
+    "psp": uc_arm.UC_ARM_REG_PSP,  # process stack pointer
     # Armv7
-    "xpsr": UC_ARM_REG_XPSR,  # special-purpose program status register
-    "xpsr_nzcvqg": UC_ARM_REG_XPSR_NZCVQG,  # special-purpose program status register with all APSR bits (default value without GE)
-    "apsr": UC_ARM_REG_APSR,  # application program status register
-    "ipsr": UC_ARM_REG_IPSR,  # interrupt program status register
-    "epsr": UC_ARM_REG_EPSR,  # execution program status register
+    "xpsr": uc_arm.UC_ARM_REG_XPSR,  # special-purpose program status register
+    "xpsr_nzcvqg": uc_arm.UC_ARM_REG_XPSR_NZCVQG,  # special-purpose program status register with all APSR bits (default value without GE)
+    "apsr": uc_arm.UC_ARM_REG_APSR,  # application program status register
+    "ipsr": uc_arm.UC_ARM_REG_IPSR,  # interrupt program status register
+    "epsr": uc_arm.UC_ARM_REG_EPSR,  # execution program status register
     # Armv7-M
-    "primask": UC_ARM_REG_PRIMASK,  # exception mask register
-    "faultmask": UC_ARM_REG_FAULTMASK,  # fault mask
-    "basepri": UC_ARM_REG_BASEPRI,  # base priority mask
+    "primask": uc_arm.UC_ARM_REG_PRIMASK,  # exception mask register
+    "faultmask": uc_arm.UC_ARM_REG_FAULTMASK,  # fault mask
+    "basepri": uc_arm.UC_ARM_REG_BASEPRI,  # base priority mask
     # ?
-    "control": UC_ARM_REG_CONTROL,  # special-purpose control register
+    "control": uc_arm.UC_ARM_REG_CONTROL,  # special-purpose control register
     # FP extension: S0-S31 alias D0-D15 which alias Q0-Q15
-    "fpscr": UC_ARM_REG_FPSCR,
+    "fpscr": uc_arm.UC_ARM_REG_FPSCR,
 }
 
 # Added in a loop because the names are numbered; the FP register file is part of
