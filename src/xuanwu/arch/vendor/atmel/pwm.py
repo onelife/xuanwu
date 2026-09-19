@@ -4,8 +4,6 @@
 
 from typing import Any
 
-from unicorn import Uc
-
 from ....config import logger
 from ...base import ArmHardwareBase, Register
 
@@ -210,16 +208,14 @@ class ArmSamPwm(ArmHardwareBase):
         self._ccnt = [0] * 8
         self._cprd = [0] * 8
 
-    def system_clock_callback(self, box: Uc, address: int, size: int, user_data: Any) -> None:
+    def advance(self, instructions: int) -> None:
+        """Advance the eight channel counters by a whole execution slice."""
+        step = self._step * instructions
         for i in range(8):
-            self._ccnt[i] += self._step
+            self._ccnt[i] += step
             if self._ccnt[i] >= self._cprd[i]:
-                self._ccnt[i] = 0
+                self._ccnt[i] %= self._cprd[i] or 1
                 # TODO: trigger interrupt
-                # csr |= 1 << CSR.COUNTFLAG
-                # if csr & (1 << CSR.TICKINT):
-                #     self._ctl.set_irq_pending(self._irq)
-                # self.write_register("CSR", csr)
 
     def fix_after_read(self, name: str, register: Register, data: int) -> int:
         # name_ = ".".join([self.NAME, name])

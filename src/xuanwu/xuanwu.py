@@ -9,14 +9,13 @@ from capstone import Cs, CS_ARCH_ARM, CS_MODE_ARM, CS_MODE_MCLASS, CS_MODE_THUMB
 
 # from keystone import Ks, KS_ARCH_ARM, KS_MODE_ARM, KS_MODE_THUMB
 # from unicorn import UC_PROT_NONE, UC_PROT_READ, UC_PROT_WRITE, UC_PROT_EXEC, UC_PROT_ALL
-import yaml
 
 from .register import RegisterController
 from .memory import MemoryController
 from .loader import ProgramLoader
 from .device import DeviceController
 from .rsp import RemoteSerialProtocol
-from .chips import resolve_chip, describe_chip_error
+from .chips import load_chip_document, resolve_chip, describe_chip_error
 from .exception import XwInvalidParameter, XwInvalidChipInformation
 
 
@@ -77,8 +76,7 @@ class XuanWu(object):
         chip = resolve_chip(chip)
         if not path.exists(chip):
             raise XwInvalidParameter(describe_chip_error(chip))
-        with open(chip, encoding="utf-8") as file:
-            doc = yaml.safe_load(file)
+        doc = load_chip_document(chip)
         if "chip" not in doc:
             raise XwInvalidChipInformation(f"Invalid chip information file: {chip}")
         self._chip = doc["chip"]
@@ -202,14 +200,47 @@ class XuanWu(object):
         ``(begin, until, timeout, count)``, and passing the instruction budget as
         the third positional argument silently turned it into a millisecond
         timeout.
+
+        Execution is sliced rather than run in one call: each slice ends at the
+        next deadline (SysTick, or a model that watches external input), and every
+        pending exception is taken at those boundaries.  That is what keeps the
+        guest from paying a Python callback per instruction -- see
+        :meth:`~xuanwu.arch.cortex_m.controller.ArmHardwareController.next_slice`.
         """
         from unicorn import UcError, UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED, UC_ERR_INSN_INVALID, UC_ERR_FETCH_UNMAPPED
 
         try:
-            if not self.rsp:
-                self.box.emu_start(self.reg.pc_t, until, 0, count)
-            else:
+            if self.rsp:
                 self.rsp.run()
+                return
+
+            remaining = count if count else None
+            while True:
+                # Anything already pending is taken before more instructions run.
+                while self.hw.dispatch_pending_exception():
+                    pass
+                if until and self.reg.pc == until:
+                    break
+                if remaining is not None and remaining <= 0:
+                    break
+                try:
+                    self.hw.run_slice(self.hw.next_slice(remaining), until or None)
+                except UcError as err:
+                    # A slice that ended inside a Thumb IT block leaves Unicorn's
+                    # IT state behind; the *next* slice then rejects the following
+                    # instruction.  The failing slice executed nothing, so nothing
+                    # has to be accounted for and the slice can just be retried.
+                    if err.errno == UC_ERR_INSN_INVALID and self.hw.repair_stale_it_state():
+                        continue
+                    raise
+                executed = self.hw.executed
+                self.hw.advance(executed)
+                if remaining is not None:
+                    remaining -= executed
+                if executed == 0:  # nothing moved: never spin
+                    break
+                if until and self.reg.pc == until:
+                    break
         except UcError as err:
             if err.errno in (UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED, UC_ERR_INSN_INVALID):
                 self.show_inst(-1, 1)

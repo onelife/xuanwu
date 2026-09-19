@@ -16,10 +16,8 @@ its reload value from the real clock and one that reads ``CALIB`` agree.
 
 from typing import Any
 
-from unicorn import Uc
-
 from ...config import logger
-from ..base import ArmHardwareBase, Register
+from ..base import NEVER, ArmHardwareBase, Register
 from .constants import CSR
 
 __all__ = ["ArmHardwareSystick"]
@@ -89,20 +87,26 @@ class ArmHardwareSystick(ArmHardwareBase):
         self._cycles = 0.0
         self._ticks = 0
 
-    def system_clock_callback(self, box: Uc, address: int, size: int, user_data: Any) -> None:
-        """Advance the time base by one instruction."""
-        self._cycles += self._cycles_per_instruction
+    def advance(self, instructions: int) -> None:
+        """Move the time base forward by ``instructions`` executed instructions.
+
+        Called once per execution slice instead of once per instruction: the
+        counter is arithmetic, so a slice of ten thousand instructions costs the
+        same as a slice of one, and the tick positions stay exact.
+        """
+        delta = instructions * self._cycles_per_instruction
+        self._cycles += delta
         period = self._rvr + 1
         if self._csr & (1 << CSR.ENABLE) == 0:
             # Disabled: the counter is held at the reload value.
             self._cycles_left = period
         else:
-            self._cycles_left -= self._cycles_per_instruction
+            self._cycles_left -= delta
             if self._cycles_left <= 0:
                 # A period is RVR + 1 cycles.  Counting the periods in one step
-                # keeps this exact (and O(1)) even when one instruction is longer
-                # than a whole period; the pending interrupt is a single flag, so
-                # missing several periods collapses into one.
+                # keeps this exact even when a slice spans several of them; the
+                # pending interrupt is a single flag, so missing periods collapse
+                # into one.
                 missed = int(-self._cycles_left // period) + 1
                 self._cycles_left += missed * period
                 self._ticks += missed
@@ -113,6 +117,12 @@ class ArmHardwareSystick(ArmHardwareBase):
         # CVR is the number of cycles still to go before the counter wraps; the
         # reload value is RVR, so the value just after a wrap reads as RVR.
         self._cvr = min(int(self._cycles_left), self._rvr)
+
+    def next_deadline(self) -> int:
+        """Instructions that may still be executed before the counter wraps."""
+        if self._csr & (1 << CSR.ENABLE) == 0 or self._cycles_per_instruction <= 0:
+            return NEVER
+        return max(1, int(-(-self._cycles_left // self._cycles_per_instruction)))
 
     def fix_after_read(self, name: str, register: Register, data: int) -> int:
         name_ = ".".join([self.NAME, name])

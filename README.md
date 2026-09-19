@@ -19,6 +19,10 @@ mostly a matter of writing a description and, where needed, one peripheral model
   `src/xuanwu/data/chips/`, not in code.
 - **Cortex-M interrupt engine** — exception entry/exit, tail-chaining, nested
   preemption, `EXC_RETURN` validation, `PRIMASK`/`FAULTMASK`/`BASEPRI` masking.
+- **Sliced execution** — the guest runs to the next deadline (a timer, a pending
+  interrupt, external input) instead of paying a Python callback per instruction,
+  which is worth ~160x: 138 M instructions/s against 0.85 M with per-instruction
+  hooks.
 - **Floating point** — VFP code runs and the extended exception frame is stacked
   and restored, so values held in S0-S15 survive an interrupt. The FP system
   registers (`FPCCR`, `FPCAR`, `FPDSCR`, `MVFR0/1/2`) are modelled.

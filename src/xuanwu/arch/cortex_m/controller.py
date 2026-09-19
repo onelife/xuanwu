@@ -49,6 +49,11 @@ class ArmHardwareController(object):
         self._irq_op: Dict[int, IrqOp] = {}
         self._irq_pending: List[int] = []
         self._irq_handling: List[int] = []
+        # Timed models and execution slices: see advance()/next_slice().
+        self._timed: List[Any] = []
+        self._max_slice = int(self._options.get("max_slice", 10000))
+        self._in_slice = False
+        self._executed = 0
         self._box.hook_add(UC_HOOK_INTR, self.system_interrupt_callback)
 
     def register_irq_op(self, irq: int, irq_op: IrqOp) -> None:
@@ -88,13 +93,13 @@ class ArmHardwareController(object):
             sp_mask = ~0x0
         if control & (1 << CONTROL.SPSEL) and self._thread_mode:
             sp = self._reg.read("psp")
-            frame_ptr_align = force_align and (sp & 0x4)
+            frame_ptr_align = 1 if (force_align and (sp & 0x4)) else 0
             sp = (sp & sp_mask) - frame_size
             self._reg.write("psp", sp)
             # logger.debug(f"push_context: p{sp = :08x}")
         else:
             sp = self._reg.read("msp")
-            frame_ptr_align = force_align and (sp & 0x4)
+            frame_ptr_align = 1 if (force_align and (sp & 0x4)) else 0
             sp = (sp & sp_mask) - frame_size
             self._reg.write("msp", sp)
             # logger.debug(f"push_context: m{sp = :08x}")
@@ -112,6 +117,10 @@ class ArmHardwareController(object):
             if reg == "pc" and exception in [Exception_.MemManage, Exception_.UsageFault]:
                 val -= 4
             elif reg == "xpsr":
+                # SPREALIGN is bit 9 of the stacked xPSR.  ``frame_ptr_align``
+                # used to be the mask (0 or 4) rather than a flag, so this wrote
+                # 0x800 -- which is IT[3], not SPREALIGN, so every exception turn
+                # corrupted the Thumb IT state in the restored context.
                 val = (val & 0xFFFFFDFF) | (frame_ptr_align << 9)
                 # logger.debug(f"push_context: {reg} = {val:08x}")
             self._mem.write(sp, self.format_.pack(val))
@@ -390,13 +399,22 @@ class ArmHardwareController(object):
             logger.info(f"intno: {intno}, data: {data}, pc: {pc:08x}, ipsr: {ipsr:08x}")
             raise
 
-    def system_clock_callback(self, box: Uc, address: int, size: int, user_data: Any) -> None:
+    def dispatch_pending_exception(self) -> bool:
+        """Take a pending exception, if one can be taken.  True when one was taken.
+
+        This used to be a ``UC_HOOK_CODE`` callback, i.e. a Python call for every
+        executed instruction, which cost a factor of 200 in throughput.  It is now
+        called at execution-slice boundaries: a model's state can only change
+        through an MMIO access, a timer deadline or external input, and all three
+        end a slice, so those boundaries are the only places an exception can
+        become pending.
+        """
         if not self._irq_pending:
-            return
+            return False
         # logger.debug(f"{self._irq_pending =}, {self._irq_handling =}")
         is_preempted, next_irq, _ = self.get_next_irq()
         if not is_preempted:
-            return
+            return False
         # preempt
         exp = self._reg.read("ipsr")
         if exp == 0:
@@ -415,6 +433,104 @@ class ArmHardwareController(object):
         # jump to ISR
         # logger.debug(f"Enter IRQ_{next_irq} handler...")
         self.jump_isr(next_irq)
+        return True
+
+    # -- execution slices -------------------------------------------------
+
+    def register_timed(self, peripheral: Any) -> None:
+        """Register a model that has to be told how much time passed."""
+        self._timed.append(peripheral)
+
+    def advance(self, instructions: int) -> None:
+        """Tell every timed model that ``instructions`` instructions were executed."""
+        for peripheral in self._timed:
+            peripheral.advance(instructions)
+
+    def next_slice(self, remaining: Optional[int] = None) -> int:
+        """How many instructions may run before something has to be looked at.
+
+        The smallest of: the configured maximum slice, every timed model's next
+        deadline, and what is left of the caller's instruction budget.
+        """
+        budget = self._max_slice
+        for peripheral in self._timed:
+            deadline = peripheral.next_deadline()
+            if deadline < budget:
+                budget = deadline
+        if remaining is not None and remaining < budget:
+            budget = remaining
+        return max(1, int(budget))
+
+    def run_slice(self, instructions: int, until: Optional[int] = None) -> None:
+        """Execute one slice, keeping track of whether an interrupt is pending.
+
+        A hook that only counts would cost what the old per-instruction dispatch
+        cost, so the count is simply the slice length -- Unicorn's ``count`` is
+        exact.  Only ``until`` can cut a slice short, and that path pays for a
+        counting hook because it has no other way to know what it executed.
+        """
+        self._in_slice = True
+        try:
+            if until:
+                counter = [0]
+
+                def _count(box: Uc, address: int, size: int, user_data: Any) -> None:
+                    counter[0] += 1
+
+                handle = self._box.hook_add(UC_HOOK_CODE, _count)
+                try:
+                    self._box.emu_start(self._reg.pc_t, until, 0, instructions)
+                finally:
+                    self._box.hook_del(handle)
+                self._executed = counter[0]
+            else:
+                self._box.emu_start(self._reg.pc_t, 0, 0, instructions)
+                self._executed = instructions
+        finally:
+            self._in_slice = False
+
+    @property
+    def executed(self) -> int:
+        """Instructions the last :meth:`run_slice` actually executed."""
+        return self._executed
+
+    # -- the IT-state hazard of sliced execution --------------------------
+
+    def it_state(self) -> int:
+        """The Thumb IT bits of the EPSR (``IT[7:2]``; zero means "not in an IT block")."""
+        return (self._reg.read("epsr") >> 10) & 0x3F
+
+    def repair_stale_it_state(self) -> bool:
+        """Clear a leftover Thumb IT state left behind by an interrupted slice.
+
+        Unicorn implements the end of a Thumb IT block as a store to its cached IT
+        state, emitted as part of the translated block.  Ending an execution slice
+        on the *last* instruction of an IT block skips that store, so the next
+        ``emu_start`` resumes with a stale "still inside an IT block" state and
+        rejects the following instruction as ``UC_ERR_INSN_INVALID`` -- which is
+        architecturally correct for a branch inside an IT block, but the branch is
+        not really inside one.
+
+        A *genuine* mid-IT boundary cannot be told apart from a stale one by the
+        bits alone, so this checks the code: the instructions of an IT block are
+        contiguous, start at the ``IT`` encoding (``0xBFxx`` with a non-zero mask)
+        and are at most four of them, so if no such instruction is present in the
+        previous eight bytes the state is stale.  Returns True when it repaired.
+        """
+        if self.it_state() == 0:
+            return False
+        address = self._reg.pc & ~0x1
+        for back in range(1, 5):
+            try:
+                halfword = int.from_bytes(self._mem.read(address - 2 * back, 2), "little")
+            except Exception:  # noqa: BLE001 - unmapped memory simply means "no IT here"
+                break
+            if (halfword & 0xFF00) == 0xBF00 and (halfword & 0x0F):
+                return False  # a real IT block covers this address
+        epsr = self._reg.read("epsr")
+        self._reg.write("epsr", epsr & ~0x0000FC00)
+        logger.warning("Cleared a stale Thumb IT state left by a slice boundary")
+        return True
 
     def get_buildin(self, mode: str, name: str) -> Dict[str, Any]:
         """Peripheral model registry for a core/mode plus a vendor family."""
@@ -439,8 +555,6 @@ class ArmHardwareController(object):
         buildin = self.get_buildin(chip.get("mode"), chip["name"][:3].lower())
         if not buildin:
             return
-        # IRQ process function
-        self._box.hook_add(UC_HOOK_CODE, self.system_clock_callback)
         # do remap boot address
         boot = chip.get("boot", 0x0)
         if boot != 0x0:
@@ -464,8 +578,13 @@ class ArmHardwareController(object):
                 buildin_ = buildin[class_](self._box, self, name, **spec)
                 self.perif[name_] = buildin_
                 self._mem.register_io(base, size, self.perif[name_].read, self.perif[name_].write, name)
-                if hasattr(buildin_, "system_clock_callback"):
-                    logger.debug(f"[{name:8s}]: Add system_clock_callback")
+                if hasattr(buildin_, "advance"):
+                    # The model is told how much time passed at slice boundaries.
+                    self.register_timed(buildin_)
+                elif hasattr(buildin_, "system_clock_callback"):
+                    # Legacy models observe time one instruction at a time, which
+                    # costs ~200x in throughput; migrate them to advance().
+                    logger.warning(f"[{name:8s}]: per-instruction hook (slow path)")
                     self._box.hook_add(UC_HOOK_CODE, buildin_.system_clock_callback)
                 if "dma_base" in device[name]:
                     dma_name_ = f"{name_}-dma"

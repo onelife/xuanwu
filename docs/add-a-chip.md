@@ -251,7 +251,7 @@ arguments (so it comes from the YAML) and asks the controller to pend it:
         super().__init__(*args, **kwargs)
         self._irq = kwargs.get("irq", -1)
 
-    def system_clock_callback(self, box, address, size, user_data):
+    def advance(self, instructions):
         ...
         if self._imr & status:
             self._ctl.set_irq_pending(self._irq)
@@ -268,8 +268,12 @@ and the chip YAML carries the number:
 ```
 
 Any IRQ in `0..239` works, because the NVIC registers an `IrqOp` for all of them
-at construction. Defining `system_clock_callback` is what makes the controller
-attach it as a `UC_HOOK_CODE` callback — that is your "time passes" hook.
+at construction. Defining `advance(instructions)` is what makes the controller
+hand your model the length of every execution slice — that is your "time passes"
+hook, and it costs one call per slice instead of one per instruction. If the model
+also has to be serviced at a known time, define `next_deadline()` and return how
+many instructions may still run before then; the scheduler will end the slice
+there. Both are documented in `docs/architecture.md` §7.1/§7.2.
 
 ### 3.6 Host-facing peripherals
 

@@ -21,7 +21,15 @@ from ..exception import XwInvalidMemoryAddress, XwInvalidMemorySize
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids an import cycle
     from .cortex_m.controller import ArmHardwareController
 
-__all__ = ["arm_core_registers", "arm_context_registers", "Register", "IrqOp", "ArmHardwareBase"]
+__all__ = ["NEVER", "arm_core_registers", "arm_context_registers", "Register", "IrqOp", "ArmHardwareBase"]
+
+
+NEVER = 1 << 62
+"""What :meth:`next_deadline` returns for "this model never needs servicing again".
+
+A large integer rather than ``float("inf")`` so the scheduler can stay in integer
+arithmetic -- the value it produces is used as an instruction count.
+"""
 
 
 arm_core_registers = {
@@ -132,6 +140,16 @@ class ArmHardwareBase(ABC):
     @abstractmethod
     def reset(self):
         logger.debug(f"{self.NAME} memory size: {hex(sum([reg.format.size for reg in self.registers.values()]))}")
+
+    def next_deadline(self) -> int:
+        """Instructions that may run before this model has to be serviced again.
+
+        The scheduler in :class:`ArmHardwareController` asks every model that
+        implements :meth:`advance` for its next deadline and ends the execution
+        slice at the earliest one.  Returning :data:`NEVER` means "no deadline of
+        my own": the model still gets :meth:`advance` at every slice boundary.
+        """
+        return NEVER
 
     def read(self, address: int, size: int, internal: Optional[bool] = False) -> int:
         offset = address - self._base
