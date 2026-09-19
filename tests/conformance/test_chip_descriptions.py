@@ -124,17 +124,44 @@ class TestChipDescriptionConsistency:
 
 
 class TestDmaWindows:
-    def test_dma_window_lies_inside_its_peripheral(self, chip_yaml):
-        chip = load(chip_yaml)
-        offenders = []
+    """A `core` peripheral may declare a second register window: its DMA block.
+
+    On the SAM3X that block sits 0x100 bytes after the peripheral's own registers
+    -- the UART's PDC is at 0x400E0900 while the UART block the model implements
+    ends at 0x400E0824 -- so it is *not* inside the peripheral's own block.  What
+    has to hold is that the window is mapped and non-empty, and that it does not
+    overlap the peripheral's own block: the controller registers a separate IO
+    record for it, and overlapping IO windows make an access ambiguous, which the
+    memory controller rejects at run time.
+    """
+
+    def dma_windows(self, chip):
         for name, spec in peripherals(chip):
             if "dma_base" not in spec:
                 continue
-            dma_end = spec["dma_base"] + spec.get("dma_size", 0)
-            if not (spec["base"] <= spec["dma_base"] and dma_end <= spec["base"] + spec["size"]):
-                offenders.append(
-                    f"{name}: dma window [0x{spec['dma_base']:08x},0x{dma_end:08x}) is outside "
-                    f"the peripheral block [0x{spec['base']:08x},0x{spec['base'] + spec['size']:08x})"
-                )
-        if offenders:
-            pytest.xfail("known issue: " + "; ".join(offenders))
+            start = spec["dma_base"]
+            yield name, spec, start, start + spec.get("dma_size", 0)
+
+    def test_every_dma_window_is_mapped(self, chip_yaml):
+        chip = load(chip_yaml)
+        containers = mapped_ranges(chip)
+        for name, _spec, start, end in self.dma_windows(chip):
+            assert end > start, f"{name}: the dma window is empty"
+            assert any(lo <= start and end <= hi for lo, hi, _ in containers), (
+                f"{name}: dma window [0x{start:08x},0x{end:08x}) is not inside any mapped region"
+            )
+
+    def test_every_dma_window_has_a_size(self, chip_yaml):
+        chip = load(chip_yaml)
+        for name, spec, _start, _end in self.dma_windows(chip):
+            assert spec.get("dma_size", 0) > 0, f"{name}: 'dma_base' needs a 'dma_size'"
+
+    def test_the_dma_window_does_not_overlap_its_peripheral(self, chip_yaml):
+        chip = load(chip_yaml)
+        for name, spec, start, end in self.dma_windows(chip):
+            block_start = spec["base"]
+            block_end = block_start + spec["size"]
+            assert end <= block_start or start >= block_end, (
+                f"{name}: dma window [0x{start:08x},0x{end:08x}) overlaps the peripheral block "
+                f"[0x{block_start:08x},0x{block_end:08x}); accesses inside the overlap would be ambiguous"
+            )
