@@ -6,6 +6,13 @@ chip:
   # 0x00080000: Flash bank 0
   # 0x000C0000: Flash bank 1
   boot: 0x00080000
+  #
+  # Not modelled, and where they live on the part (see
+  # tests/conformance/test_sam3x8e_map.py): HSMCI 0x40000000, SSC 0x40004000,
+  # SPI1 0x4000C000, TC0/1/2 0x40080000/4000/8000, USART0-3 0x40098000..,
+  # EMAC 0x400B0000, CAN0/1 0x400B4000/8000, TRNG 0x400BC000, DMAC 0x400C4000,
+  # DACC 0x400C8000, SMC 0x400E0000, SDRAMC 0x400E0200, MATRIX 0x400E0400,
+  # CHIPID 0x400E0940, RSTC/SUPC/RTTC/WDT/RTT/GPBR 0x400E1A00...
   peripherals:
     - "Flash":
         type: memory
@@ -77,6 +84,14 @@ chip:
         type: core
         base:  0x400E0600
         size: 0x110
+    - EFC0:  # embedded flash controller (bank 0)
+        type: core
+        base: 0x400E0A00
+        size: 0x14
+    - EFC1:  # embedded flash controller (bank 1)
+        type: core
+        base: 0x400E0C00
+        size: 0x14
     - GPIOA:
         type: core
         base: 0x400E0E00
@@ -110,6 +125,7 @@ chip:
         base: 0x400E0800
         size: 0x24
         baudrate: 115200
+        clock: 84000000  # peripheral clock, Hz: sets how often the host is polled
         # How the simulated UART is exposed to the host:
         #   auto     - socat pty pair when socat is installed, otherwise TCP
         #   socat    - POSIX pty pair (external programs open peer_hint as a tty)
@@ -127,12 +143,24 @@ chip:
         size: 0xEC
         # The FLASH device below takes over this peripheral's byte stream.
         bridge: none
+    - TWI0:  # two-wire interface (I2C master), the Wire1 instance on a Due
+        type: core
+        base: 0x4008C000
+        size: 0x2C
+        irq: 22
+    - TWI1:  # two-wire interface (I2C master), the Wire instance on a Due
+        type: core
+        base: 0x40090000
+        size: 0x2C
+        irq: 23
     - PWM:  # pulse width modulation
         type: core
         base: 0x40094000
         size: 0x300
     - UOTGHS:
         type: core
+        # The *device* register block at +0x800, which is what a firmware brings up
+        # (the general block at 0x400AC000 is not modelled).
         base: 0x400AC800
         size: 0x34
 

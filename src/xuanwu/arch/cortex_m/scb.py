@@ -207,10 +207,14 @@ class ArmHardwareScb(ArmHardwareBase):
             raise RuntimeError(f"Invalid exception when set active, {exp}")
         offset = self.ACTIVE_BIT[exp]
         shcsr = self.read_register("SHCSR")
+        # ``state=True`` means the exception *is* active, so the bit goes up.  This
+        # was inverted, which made SHCSR report every active exception as inactive
+        # and vice versa -- and the Arduino ``micros()`` formula reads
+        # SHCSR.SYSTICKACT as its "a tick is due" term.
         if state:
-            shcsr &= ~(1 << offset)
-        else:
             shcsr |= 1 << offset
+        else:
+            shcsr &= ~(1 << offset)
         self.write_register("SHCSR", shcsr)
 
     def get_priority(self, exp: int) -> int:

@@ -246,13 +246,19 @@ class ArmSamPmc(ArmHardwareBase):
                         logger.warning(f"[{name_:16s}]: Invalid ONE, 0x{data:08x}")
                         data = data_orig
                     else:
+                        # LOCKA reports that PLLA is running and locked, which a valid
+                        # write with a non-zero divider has just established.  Keying it
+                        # off the multiplier instead would call a PLL with MULA = 0 (a
+                        # divide-by-one) unlocked, and would set it for a write that
+                        # leaves the PLL off.
+                        locked = bool(data & 0x000000FF)  # DIVA
                         data &= ~(1 << PMC_PLLAR.ONE)
-                    sr = self.read_register("SR")
-                    if data & 0xFFFF0000:
-                        sr |= 1 << PMC_SR.LOCKA
-                    else:
-                        sr &= ~(1 << PMC_SR.LOCKA)
-                    self.write_register("SR", sr)
+                        sr = self.read_register("SR")
+                        if locked:
+                            sr |= 1 << PMC_SR.LOCKA
+                        else:
+                            sr &= ~(1 << PMC_SR.LOCKA)
+                        self.write_register("SR", sr)
                 if name == "UCKR":
                     sr = self.read_register("SR")
                     if data & (1 << PMC_UCKR.UPLLEN):

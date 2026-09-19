@@ -5,11 +5,9 @@
 from enum import IntEnum
 from typing import Any
 
-from unicorn import Uc
-
 from ....backends import create_bridge
 from ....config import logger
-from ...base import ArmHardwareBase, Register
+from ...base import NEVER, ArmHardwareBase, Register
 from .common import PID
 from .pdc import ArmSamPdc
 
@@ -62,11 +60,22 @@ class ArmSamUart(ArmHardwareBase):
         self._fix_after_read = self.fix_after_read
         self._fix_before_write = self.fix_before_write
         # 'bridge' may be set in the chip YAML: auto | socat | tcp | loopback
+        self.baudrate = int(kwargs.get("baudrate", 115200))
         self._bridge = create_bridge(
             kwargs.get("bridge", "auto"),
-            baudrate=kwargs.get("baudrate", 115200),
+            baudrate=self.baudrate,
             prefix="uart",
         )
+        # Polling the host faster than a character can arrive buys nothing, and every
+        # poll ends an execution slice, so it costs Python work on the hot path: one
+        # character time is the interval at which an incoming byte is seen as soon as
+        # the line could have delivered it.  Without a clock (a hand-written
+        # peripheral) fall back to a slice that is long but still responsive.
+        clock = int(kwargs.get("clock", 0))
+        if clock and self.baudrate:
+            self.poll_interval = max(256, clock * 10 // self.baudrate)
+        else:
+            self.poll_interval = 4096
         logger.info(f"Serial device (UART): {self._bridge.peer_hint}")
         self._dma = None
 
@@ -109,25 +118,29 @@ class ArmSamUart(ArmHardwareBase):
             previous.close()
         self._bridge = bridge
 
-    def system_clock_callback(self, box: Uc, address: int, size: int, user_data: Any) -> None:
+    POLL_INTERVAL = 512
+    """Fallback instructions between polls of the host side (see ``poll_interval``).
+
+    The byte stream from the bridge arrives asynchronously, so the poll interval is
+    how long a byte may sit unnoticed -- it also bounds how long the scheduler may
+    run.  The instance value is derived from the peripheral clock and the baud rate
+    when the chip description declares a clock, and this is what is used otherwise.
+    """
+
+    def refresh_status(self) -> None:
+        """Sample the host side and update the status/interrupt state."""
         cr = self.read_register("CR")
         sr = data = self.read_register("SR")
         if self._bridge.in_waiting > 0:
             if cr & (1 << UART_CR.RXEN):
                 if not self._last_rx_new:
-                    # self._last_rx = int.from_bytes(self._bridge.read(self._bridge.in_waiting + 10)[-1], "little")
                     rx = self._bridge.read(1)
                     self._last_rx = int.from_bytes(rx, "little")
-                    # logger.debug(f"UART RX: {rx}")
                     self._last_rx_new = True
                 data |= 1 << UART_SR.RXRDY
             else:
                 _ = self._bridge.read(self._bridge.in_waiting + 128)
-        # if self._bridge.in_waiting > 1:
-        #     sr |= 1 << UART_SR.OVRE
         if cr & (1 << UART_CR.TXEN):
-            # if self._bridge.out_waiting <= 1:
-            #     sr |= 1 << UART_SR.TXRDY
             data |= 1 << UART_SR.TXRDY
         if sr != data:
             self.write_register("SR", data)
@@ -135,9 +148,23 @@ class ArmSamUart(ArmHardwareBase):
         if imr & data and not self._ctl.is_irq_pending_or_active(self._irq):
             self._ctl.set_irq_pending(self._irq)
 
+    def advance(self, instructions: int) -> None:
+        """Called at execution-slice boundaries instead of once per instruction."""
+        self.refresh_status()
+
+    def next_deadline(self) -> int:
+        # Polling the host is only worth anything while the receiver is on.
+        if self.read_register("CR") & (1 << UART_CR.RXEN):
+            return self.poll_interval
+        return NEVER
+
     def fix_after_read(self, name: str, register: Register, data: int) -> int:
         # name_ = ".".join([self.NAME, name])
-        if name == "RHR":
+        if name == "SR":
+            # The host side can deliver a byte at any time, so sample it here
+            # rather than relying on the slice boundary.
+            self.refresh_status()
+        elif name == "RHR":
             sr = data_ = self.read_register("SR")
             data_ &= ~(1 << UART_SR.RXRDY)
             if sr != data_:

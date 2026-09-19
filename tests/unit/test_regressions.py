@@ -10,6 +10,8 @@ import pytest
 
 from xuanwu.exception import XwInvalidMemoryAddress, XwInvalidMemorySize, XwInvalidParameter
 
+from xuanwu.arch.cortex_m.constants import Exception_, SHCSR
+
 
 @pytest.fixture(scope="module")
 def box(stm32f411_with_firmware):
@@ -180,6 +182,34 @@ class TestNvicRegisterTableIsPerInstance:
         # writing all ones must read back as 0xFC per byte.
         nvic.write(0xE000E400, 4, 0xFFFF_FFFF)
         assert nvic.read(0xE000E400, 4) == 0xFCFC_FCFC
+
+
+class TestScbActiveBits:
+    """``ArmHardwareScb.set_active()`` flipped the bit in the wrong direction.
+
+    The NVIC had the same defect (see below); the SCB version survived until the
+    Arduino ``micros()`` formula, which reads ``SHCSR.SYSTICKACT`` as its
+    "a tick is due" term, was checked against the registers the guest reads.
+    """
+
+    def test_setting_active_sets_the_bit(self, box):
+        scb = box.hw.perif["scb"]
+        scb.write_register("SHCSR", 0)
+        scb.set_active(Exception_.SysTick, state=True)
+        assert scb.read_register("SHCSR") & (1 << SHCSR.SYSTICKACT)
+
+    def test_clearing_active_clears_the_bit(self, box):
+        scb = box.hw.perif["scb"]
+        scb.set_active(Exception_.SysTick, state=True)
+        scb.set_active(Exception_.SysTick, state=False)
+        assert not scb.read_register("SHCSR") & (1 << SHCSR.SYSTICKACT)
+
+    def test_each_exception_has_its_own_bit(self, box):
+        scb = box.hw.perif["scb"]
+        scb.write_register("SHCSR", 0)
+        scb.set_active(Exception_.PendSV, state=True)
+        assert scb.read_register("SHCSR") & (1 << SHCSR.PENDSVACT)
+        assert not scb.read_register("SHCSR") & (1 << SHCSR.SYSTICKACT)
 
 
 class TestErrorMessagesInterpolate:
