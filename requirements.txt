@@ -1,7 +1,10 @@
-unicorn ~= 2.0.0
-capstone ~= 4.0.2
+# unicorn 2.0.x and capstone 4.x both import distutils/pkg_resources at runtime,
+# which are gone from modern Python and setuptools.  Their 2.1 / 5.0 releases
+# dropped those imports.
+unicorn >= 2.1
+capstone >= 5.0
 pyyaml ~= 6.0
 pyserial ~= 3.5.0
 pyelftools ~= 0.29
-click~=8.0.3
-colorlog~=5.0.1
+click ~= 8.0.3
+colorlog ~= 5.0.1
