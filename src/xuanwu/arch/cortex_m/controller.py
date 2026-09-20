@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from unicorn import Uc, UC_HOOK_CODE, UC_HOOK_INTR
 
 from ...config import EXCP, logger
-from ...exception import XwUnknownHardware
+from ...exception import XwUnknownHardware, XwUnsupported
 from ...register import RegisterController
 from ...memory import MemoryController
 from ...backends.semihost import SEMIHOST_BKPT, SemiHosting
@@ -222,7 +222,11 @@ class ArmHardwareController(object):
         # get handler address
         vector = self.perif["scb"].read_register("VTOR") & 0xFFFFFF80
         exp = irq + 16
-        offset = vector | (exp << 2)
+        # The vector table base is added to the exception's offset.  It used to be
+        # ``vector | (exp << 2)``, which is only the same thing while bits 7..9 of the
+        # base are clear: a table at 0x08000200 (bit 9 set) fetched the wrong word for
+        # every exception from IRQ 112 up.
+        offset = vector + (exp << 2)
         addr = self.format_.unpack(self._mem.read(offset, 4))[0]
         tbit = addr & 0x1
         addr &= ~0x1
@@ -332,7 +336,11 @@ class ArmHardwareController(object):
 
             self._irq_handling.remove(irq)
             _, next_irq, _ = self.get_next_irq()
-            if next_irq:
+            # ``is not None``, not truthiness: the next exception may be IRQ 0, whose
+            # number is 0, and ``if next_irq`` skipped tail-chaining for it.  The core
+            # exceptions are negative here (SysTick is -1), so IRQ 0 was the only one
+            # that could be missed.
+            if next_irq is not None:
                 # tail-chaining
                 self._irq_handling.append(next_irq)
                 self._irq_pending.remove(next_irq)
@@ -393,11 +401,26 @@ class ArmHardwareController(object):
             # Arm state and the next fetch would be an invalid instruction.
             self._reg.pc_t = (self._reg.pc & ~0x1) + 2
 
+        elif intno == EXCP.SWI:
+            # SuperVisor Call: the architecture pends SVCall, and the engine takes it
+            # at the next slice boundary.  The vector is the guest's, so this is how a
+            # real-time kernel's system call reaches its handler.
+            self.set_irq_pending(Exception_.SVCall - 16)
+
         else:
             pc = self._reg.pc_t
             ipsr = self._reg.read("ipsr")
-            logger.info(f"intno: {intno}, data: {data}, pc: {pc:08x}, ipsr: {ipsr:08x}")
-            raise
+            if intno == EXCP.BKPT:
+                # A breakpoint that is not the semihosting trap: either the guest
+                # executed BKPT on purpose, or semihosting is switched off.  This used
+                # to fall through to a bare ``raise``, which Python turns into
+                # "RuntimeError: No active exception to reraise" -- a message that says
+                # nothing about what happened.
+                raise XwUnsupported(
+                    f"BKPT at 0x{pc:08x} is not a semihosting call (semihosting is "
+                    f"{'on' if self._semihost is not None else 'off'}, ipsr=0x{ipsr:08x})"
+                )
+            raise XwUnsupported(f"unhandled core exception {intno} at 0x{pc:08x} (ipsr=0x{ipsr:08x})")
 
     def dispatch_pending_exception(self) -> bool:
         """Take a pending exception, if one can be taken.  True when one was taken.
@@ -601,3 +624,10 @@ class ArmHardwareController(object):
         for name, buildin in self.perif.items():
             logger.debug(f"Reset {name}")
             buildin.reset()
+        # The engine holds what it was in the middle of as well.  Resetting the models
+        # clears their pending and active bits, so a list that still named those
+        # exceptions would run a handler for an interrupt nothing pends any more --
+        # and `get_next_irq` would report it as active.
+        self._irq_pending.clear()
+        self._irq_handling.clear()
+        self._thread_mode = True

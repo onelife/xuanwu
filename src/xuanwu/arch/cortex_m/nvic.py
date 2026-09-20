@@ -29,29 +29,44 @@ class ArmHardwareNvic(ArmHardwareBase):
         # Interrupt Set-pending Registers
         ("ISPR{0}", "I", 0xFFFFFFFF),
         ("RESERVED2", "{0}I", 0x00000000),
-        # Interrupt Clear-pending Registers
-        ("ICPR{0}", "I", 0x00000000),
+        # Interrupt Clear-pending Registers.  Write-only: a write clears the bit in
+        # the mirrored ISPR and the register itself stays zero (fix_before_write
+        # returns 0), and a read gives ISPR back.  The write mask used to be zero,
+        # which turned every NVIC_ClearPendingIRQ() into a no-op.
+        ("ICPR{0}", "I", 0xFFFFFFFF),
         ("RESERVED3", "{0}I", 0x00000000),
         # Interrupt Active Bit Registers
         ("IABR{0}", "I", 0x00000000),
+        # The gap after IABR is one 32-word block longer than the others, because the
+        # priority registers sit a block further along than a naive "one reserved gap
+        # per block" layout puts them: IPR0 is at +0x300 from ISER0 (Armv7-M 4.2.2),
+        # not +0x280.  With the short gap a driver's NVIC_SetPriority() -- which
+        # writes 0xE000E400, the architectural IPR0 -- landed on IPR32 instead, so the
+        # priority the guest set was not the priority the model scheduled on.
         ("RESERVED4", "{0}I", 0x00000000),
+        ("RESERVED5", "32I", 0x00000000),
         ("IPR{0}", "I", 0xFFFFFFFF),
     )
 
     def __init__(self, *args, **kwargs: Any) -> None:
         line_num = kwargs.get("interrupt_lines", 7) + 1
         priority_bits = kwargs.get("priority_bits", 4)
-        # fix IPR mask: only the top `priority_bits` of each priority byte exist.
-        # (The loop below used to reuse the name `mask` for the template's own
-        # mask, so this value was computed and then thrown away.)
-        priority_mask = ~((1 << priority_bits) - 1) & 0xFF
+        # Only the top `priority_bits` of each priority byte are implemented: the low
+        # bits read as zero and ignore writes (Armv7-M 4.2.3).  The mask used to be
+        # `~((1 << priority_bits) - 1) & 0xFF`, which keeps the *low* bits and throws
+        # the implemented ones away -- the same value as the architecture only for the
+        # four-bit parts every description declares.
+        priority_mask = (0xFF << (8 - priority_bits)) & 0xFF
         mask = 0
         for _ in range(4):
             mask = (mask << 8) | priority_mask
         REGS = []
         for name, fmt, write_mask in ArmHardwareNvic.REGISTERS_TEMPLATE:
             if name.startswith("RESERVED"):
-                REGS.extend([(name, fmt.format(32 - line_num), write_mask)])
+                # A gap fills the rest of its 32-word block; a literal size (the extra
+                # block above) is used as written.
+                size = fmt.format(32 - line_num) if "{0}" in fmt else fmt
+                REGS.extend([(name, size, write_mask)])
             elif name.startswith("IPR"):
                 REGS.extend([(name.format(x), fmt, mask) for x in range((line_num * 32 - 16) // 4)])
             else:
@@ -74,6 +89,16 @@ class ArmHardwareNvic(ArmHardwareBase):
 
     def reset(self):
         super().reset()
+
+    @staticmethod
+    def _block_index(name: str) -> int:
+        """The index in a register name: ``ISER10`` -> 10, ``IPR3`` -> 3.
+
+        The callers used ``int(name[-1])``, which reads ``ISER10`` as ``ISER0`` -- out
+        of reach with the eight words a 240-interrupt part needs, and wrong the moment
+        a description declares more than 320 lines.
+        """
+        return int(name.lstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
 
     @staticmethod
     def _reg2irq(reg_val: int, reg_num: int) -> Set[int]:
@@ -146,7 +171,7 @@ class ArmHardwareNvic(ArmHardwareBase):
             data = data_orig | data
             if name.startswith("ISPR"):
                 set_bits = (data ^ data_orig) & data
-                irqs = self._reg2irq(set_bits, int(name[-1]))
+                irqs = self._reg2irq(set_bits, self._block_index(name))
                 for irq in irqs:
                     self._ctl.set_irq_pending(irq)
         elif name.startswith("ICER") or name.startswith("ICPR"):
@@ -157,7 +182,7 @@ class ArmHardwareNvic(ArmHardwareBase):
             self.write_register(reg_, data_)
             if name.startswith("ICPR"):
                 clear_bits = (~data ^ data_orig_) & data
-                irqs = self._reg2irq(clear_bits, int(name[-1]))
+                irqs = self._reg2irq(clear_bits, self._block_index(name))
                 for irq in irqs:
                     self._ctl.clear_irq_pending(irq)
             data = 0

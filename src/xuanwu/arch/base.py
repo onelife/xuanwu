@@ -10,7 +10,7 @@ register file with per-access fix hooks.
 from abc import ABC, abstractmethod
 from collections import OrderedDict, namedtuple
 from struct import Struct
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Tuple
 
 from unicorn import Uc
 from unicorn import arm_const as uc_arm
@@ -139,6 +139,12 @@ class ArmHardwareBase(ABC):
 
     @abstractmethod
     def reset(self):
+        # Clearing the register file here is what makes a second reset the same as the
+        # first: every model calls this and then writes the registers whose reset value
+        # is not zero (see the models' own reset()), so a model that writes none of
+        # them -- the NVIC -- used to keep whatever the guest had left in its enable,
+        # pending and active bits.
+        self.values[:] = bytes(len(self.values))
         logger.debug(f"{self.NAME} memory size: {hex(sum([reg.format.size for reg in self.registers.values()]))}")
 
     def next_deadline(self) -> int:
@@ -151,26 +157,46 @@ class ArmHardwareBase(ABC):
         """
         return NEVER
 
-    def read(self, address: int, size: int, internal: Optional[bool] = False) -> int:
+    def _locate(self, address: int, size: int, access: str) -> Tuple[str, Register, int]:
+        """Find the register an access lands on, and where inside its word.
+
+        ``access`` is "read" or "write", for the error message.  An address that is in
+        no register -- past the end of the block, or in a gap between two of them --
+        raises XwInvalidMemoryAddress, and an access that would cross a word boundary
+        raises XwInvalidMemorySize.
+
+        A ``RESERVED`` row is a gap, not a register, and every word of it is reachable
+        so that the caller can treat it as "reserved" instead of as a malformed
+        access.  The rows used to be one multi-word ``Struct``, which made writing the
+        first word of a gap raise ``struct.error: pack expected 24 items`` (it packed
+        one value into a 24-word record) and writing any other word raise
+        XwInvalidMemoryAddress.
+        """
         offset = address - self._base
-        data_orig = None
         for name, record in self.registers.items():
-            format_, offset_, mask = record
+            format_, offset_, _mask = record
             if offset >= offset_ + format_.size:
                 continue
             byte_offset = offset & 0x3
-            offset &= ~0x3
-            if offset != offset_:
-                raise XwInvalidMemoryAddress(f"Invalid address to read {self.NAME}: 0x{address:08X} ({size})")
-            if byte_offset + size > format_.size:
-                raise XwInvalidMemorySize(f"Invalid size to read {self.NAME}: 0x{address:08X} ({size})")
-            byte_mask = (1 << (size * 8)) - 1
-            name_ = ".".join([self.NAME, name])
-            # logger.debug(f"[{name_:16s}] (R0): 0x{address:08x}{f' ({size})' if size != 4 else ''}")
-            data_orig = format_.unpack(self.values[offset_ : offset_ + format_.size])[0]
-            break
-        if data_orig is None:
-            raise XwInvalidMemoryAddress(f"Invalid address to read {self.NAME}: 0x{address:08X} ({size})")
+            if not name.startswith("RESERVED") and (offset & ~0x3) != offset_:
+                raise XwInvalidMemoryAddress(f"Invalid address to {access} {self.NAME}: 0x{address:08X} ({size})")
+            if byte_offset + size > 4:
+                raise XwInvalidMemorySize(f"Invalid size to {access} {self.NAME}: 0x{address:08X} ({size})")
+            return name, record, byte_offset
+        raise XwInvalidMemoryAddress(f"Invalid address to {access} {self.NAME}: 0x{address:08X} ({size})")
+
+    def read(self, address: int, size: int, internal: Optional[bool] = False) -> int:
+        name, record, byte_offset = self._locate(address, size, "read")
+        format_, offset_, _mask = record
+        if name.startswith("RESERVED"):
+            # A reserved word is not a register: a firmware that reads one gets zero,
+            # rather than ending the simulation over a stray pointer.
+            logger.debug(f"[{self.NAME:8s}]: read of reserved 0x{address:08X} ({size}) => 0")
+            return 0
+        byte_mask = (1 << (size * 8)) - 1
+        name_ = ".".join([self.NAME, name])
+        # logger.debug(f"[{name_:16s}] (R0): 0x{address:08x}{f' ({size})' if size != 4 else ''}")
+        data_orig = format_.unpack(self.values[offset_ : offset_ + format_.size])[0]
         data = (data_orig >> (byte_offset * 8)) & byte_mask
         if self._fix_after_read:
             data = self._fix_after_read(name, record, data)
@@ -179,33 +205,26 @@ class ArmHardwareBase(ABC):
         return data
 
     def write(self, address: int, size: int, data: int, internal: Optional[bool] = False) -> None:
-        offset = address - self._base
-        data_orig = None
-        for name, record in self.registers.items():
-            format_, offset_, mask = record
-            if offset >= offset_ + format_.size:
-                continue
-            byte_offset = offset & 0x3
-            offset &= ~0x3
-            if offset != offset_:
-                raise XwInvalidMemoryAddress(f"Invalid address to write {self.NAME}: 0x{address:08X} ({size})")
-            if byte_offset + size > format_.size:
-                raise XwInvalidMemorySize(f"Invalid size to write {self.NAME}: 0x{address:08X} ({size})")
-            byte_mask = (1 << (size * 8)) - 1
-            name_ = ".".join([self.NAME, name])
-            # logger.debug(f"[{name_:16s}] (W0): 0x{self._base + offset:08x}{f' ({size})' if size != 4 else ''} <= 0x{data:08x}")
-            data_orig = format_.unpack(self.values[offset_ : offset_ + format_.size])[0]
-            break
-        if data_orig is None:
-            raise XwInvalidMemoryAddress(f"Invalid address to write {self.NAME}: 0x{address:08X} ({size})")
+        name, record, byte_offset = self._locate(address, size, "write")
+        format_, offset_, mask = record
+        if name.startswith("RESERVED"):
+            # The same on the way in: a write to a gap is dropped.  It used to raise
+            # (see _locate), which is a hard failure for a guest bug the part itself
+            # would simply ignore.
+            logger.debug(f"[{self.NAME:8s}]: write of 0x{data:08X} to reserved 0x{address:08X} ({size}) dropped")
+            return
+        byte_mask = (1 << (size * 8)) - 1
+        name_ = ".".join([self.NAME, name])
+        # logger.debug(f"[{name_:16s}] (W0): 0x{self._base + offset:08x}{f' ({size})' if size != 4 else ''} <= 0x{data:08x}")
+        data_orig = format_.unpack(self.values[offset_ : offset_ + format_.size])[0]
         data = (data_orig & ~mask) | (((data & byte_mask) << (byte_offset * 8)) & mask)
         if self._fix_before_write:
             data = self._fix_before_write(name, record, data, data_orig)
         value = format_.pack(data)
-        self.values[:] = self.values[:offset] + value + self.values[offset + size :]
+        self.values[:] = self.values[:offset_] + value + self.values[offset_ + size :]
         if not internal:
             logger.debug(
-                f"[{name_:16s}] (W): 0x{self._base + offset:08x}{f' ({size})' if size != 4 else ''} <= 0x{data:08x}"
+                f"[{name_:16s}] (W): 0x{self._base + offset_:08x}{f' ({size})' if size != 4 else ''} <= 0x{data:08x}"
             )
 
     def read_register(self, name: str) -> int:

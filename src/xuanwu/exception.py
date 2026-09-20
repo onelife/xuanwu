@@ -11,6 +11,7 @@ __all__ = [
     "XwInvalidMemoryAddress",
     "XwInvalidMemorySize",
     "XwUnknownHardware",
+    "XwUnsupported",
     "XwSerialBridgeError",
 ]
 
@@ -50,6 +51,16 @@ class XwInvalidMemorySize(BaseException):
 
 class XwUnknownHardware(BaseException):
     pass
+
+
+class XwUnsupported(BaseException):
+    """Raised when the guest asks for something the simulator does not model.
+
+    A core exception the engine has no behaviour for (a BKPT that is not the
+    semihosting trap, say) ends the run with this, rather than with a bare ``raise``
+    whose message -- "No active exception to reraise" -- says nothing about what the
+    guest did.
+    """
 
 
 class XwSerialBridgeError(BaseException):
