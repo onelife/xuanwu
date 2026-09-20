@@ -433,3 +433,75 @@ class TestUnhandledCoreExceptions:
 
         with pytest.raises(XwUnsupported):
             box.hw.system_interrupt_callback(box.box, 99, None)
+
+
+class TestStGpioPorts:
+    """Three defects in the STM32 GPIO model (see docs/plan-go.md, appendix D.1 11-13).
+
+    All three are on paths a firmware only reaches when it configures a port's initial
+    state, locks a pin, or names one pin in both halves of one BSRR write, so none of
+    them shows up in the parity corpus -- which is why they survived until the Go port
+    had to decide, pin by pin, whether to reproduce them.
+    """
+
+    MODER = 0x00
+    ODR = 0x14
+    BSRR = 0x18
+    LCKR = 0x1C
+    AFRL = 0x20
+    AFRH = 0x24
+
+    def test_each_port_keeps_its_own_reset_values(self, box):
+        # Two `if`s followed by a single `else` -- and the `else` belonged to the
+        # second one -- zeroed GPIOA right after its documented reset values had been
+        # written, leaving only GPIOB with the state its datasheet gives it.
+        box.reset()
+        assert box.hw.perif["gpioa"].read_register("MODER") == 0xA800_0000
+        assert box.hw.perif["gpioa"].read_register("OSPEEDR") == 0x0C00_0000
+        assert box.hw.perif["gpioa"].read_register("PUPDR") == 0x6400_0000
+        assert box.hw.perif["gpiob"].read_register("MODER") == 0x0000_0280
+        assert box.hw.perif["gpiob"].read_register("OSPEEDR") == 0x0000_00C0
+        assert box.hw.perif["gpiob"].read_register("PUPDR") == 0x0000_0100
+        assert box.hw.perif["gpioc"].read_register("MODER") == 0
+
+    def test_the_lock_register_protects_the_pins_it_named(self, box):
+        box.reset()
+        base = 0x4002_0800
+        gpio = box.hw.perif["gpioc"]
+        gpio.write(base + self.MODER, 4, 0x0000_0001)  # pin 0: output
+        # The datasheet's sequence, with pins 0 and 15 named; bit 16 is the lock bit.
+        pins = 0x8001
+        gpio.write(base + self.LCKR, 4, pins | 0x0001_0000)
+        gpio.write(base + self.LCKR, 4, pins)
+        gpio.write(base + self.LCKR, 4, pins | 0x0001_0000)
+        assert gpio._lock_seq == 4
+
+        # A locked field keeps the value it was locked with ...
+        gpio.write(base + self.MODER, 4, 0x0000_0002)
+        assert gpio.read_register("MODER") & 0x3 == 0x1
+        # ... including pin 15's field at the top of the word ...
+        gpio.write(base + self.MODER, 4, 0xFFFF_FFFF)
+        assert gpio.read_register("MODER") >> 30 == 0
+        # ... while the pins that were not named still take the write.
+        assert gpio.read_register("MODER") & 0x0000_000C == 0x0000_000C
+        # AFRL carries pins 0-7 and AFRH pins 8-15, four bits each.
+        gpio.write(base + self.AFRL, 4, 0xFFFF_FFFF)
+        assert gpio.read_register("AFRL") == 0xFFFF_FFF0
+        gpio.write(base + self.AFRH, 4, 0xFFFF_FFFF)
+        assert gpio.read_register("AFRH") == 0x0FFF_FFFF
+
+    def test_a_pin_named_in_both_halves_of_bsrr_ends_low(self, box):
+        box.reset()
+        base = 0x4002_0800
+        gpio = box.hw.perif["gpioc"]
+        gpio.write(base + self.BSRR, 4, 1 << 13)
+        assert gpio.read_register("ODR") == 1 << 13
+        # The reset half has priority (RM0383 8.4.7); the model applied the set half
+        # last, so a pin named twice ended up high.
+        gpio.write(base + self.BSRR, 4, (1 << 13) | (1 << (13 + 16)))
+        assert gpio.read_register("ODR") == 0
+        gpio.write(base + self.BSRR, 4, 1 << 13)
+        assert gpio.read_register("ODR") == 1 << 13
+        gpio.write(base + self.BSRR, 4, 1 << (13 + 16))
+        assert gpio.read_register("ODR") == 0
+        assert gpio.read_register("BSRR") == 0  # write-only: the write is consumed

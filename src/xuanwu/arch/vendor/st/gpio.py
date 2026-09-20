@@ -36,11 +36,13 @@ class ArmStmGpio(ArmHardwareBase):
 
     def reset(self):
         super().reset()
+        # One chain, not two: the ports are alternatives, so a port that matched an
+        # earlier branch keeps the reset values its datasheet gives it.
         if self.NAME.endswith("A"):
             self.write_register("MODER", 0xA8000000)
             self.write_register("OSPEEDR", 0x0C000000)
             self.write_register("PUPDR", 0x64000000)
-        if self.NAME.endswith("B"):
+        elif self.NAME.endswith("B"):
             self.write_register("MODER", 0x00000280)
             self.write_register("OSPEEDR", 0x000000C0)
             self.write_register("PUPDR", 0x00000100)
@@ -64,26 +66,21 @@ class ArmStmGpio(ArmHardwareBase):
                 mask = self._lock_val & 0xFFFF
                 data = (data & ~mask) | (data_orig & mask)
             elif name in ["MODER", "OSPEEDR", "PUPDR"]:
-                val = self._lock_val
+                # One LCKR bit per pin protects that pin's two-bit field, so the mask
+                # has to place every field where it belongs instead of shifting the
+                # accumulator once more after each one.
                 mask = 0
                 for i in range(16):
-                    val_ = val & 0x1
-                    if val_:
-                        mask |= 0x3
-                    val >>= 1
-                    mask <<= 2
+                    if self._lock_val & (0x1 << i):
+                        mask |= 0x3 << (2 * i)
                 data = (data & ~mask) | (data_orig & mask)
             elif name in ["AFRL", "AFRH"]:
-                val = self._lock_val
+                # AFRL carries pins 0-7 and AFRH pins 8-15, four bits each.
+                base = 0 if name == "AFRL" else 8
                 mask = 0
-                for i in range(16):
-                    val_ = val & 0x1
-                    if val_:
-                        mask |= 0xF
-                    val >>= 1
-                    mask <<= 4
-                if name == "AFRH":
-                    mask >>= 32
+                for i in range(8):
+                    if self._lock_val & (0x1 << (base + i)):
+                        mask |= 0xF << (4 * i)
                 mask &= 0xFFFFFFFF
                 data = (data & ~mask) | (data_orig & mask)
         if name == "ODR":
@@ -104,16 +101,18 @@ class ArmStmGpio(ArmHardwareBase):
             br = (data >> 16) & 0xFFFF
             bs = data & 0xFFFF
             odr = self.read_register("ODR")
-            odr = ((odr & ~br) | bs) & 0xFFFF
+            # A pin named in both halves ends up low: the reset half wins, so the
+            # whole set half is applied first (RM0383 8.4.7).
+            odr = ((odr | bs) & ~br) & 0xFFFF
             self.write_register("ODR", odr)
             data = 0x0
             for i in range(16):
                 br_ = br & 0x01
                 bs_ = bs & 0x01
-                if bs_:
-                    logger.debug(f"[{name_:16s}]: Set P{self.NAME[-1]}{i}")
-                elif br_:
+                if br_:
                     logger.debug(f"[{name_:16s}]: Reset P{self.NAME[-1]}{i}")
+                elif bs_:
+                    logger.debug(f"[{name_:16s}]: Set P{self.NAME[-1]}{i}")
                 br >>= 1
                 bs >>= 1
         elif name == "LCKR":
