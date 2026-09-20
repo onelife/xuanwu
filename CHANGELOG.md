@@ -63,6 +63,22 @@ unusual input.
   `P0=78563412` for `set $r0 = 0x12345678`, so the register came back byte-swapped
   (`0x78563412`); the value is now decoded as the register's bytes, and padded or
   truncated to the width the target description declares.
+- **Three STM32 GPIO defects** (`arch/vendor/st/gpio.py`).  The Go port had copied all
+  three rather than diverge from the reference, so both implementations were corrected
+  together (`TestStGpioPorts` here, `st_test.go` there).  They only show up in firmware
+  that configures a port's initial state, locks a pin, or names one pin in both halves of
+  a single `BSRR` write -- none of which the firmware ladder does:
+  - `reset()` was two `if`s followed by a single `else`, and the `else` belonged to the
+    second one, so GPIOA's documented reset values (`MODER` `0xA8000000`, `OSPEEDR`
+    `0x0C000000`, `PUPDR` `0x64000000`) were written and then immediately zeroed.  The
+    ports are now one `if`/`elif`/`else` chain, and each keeps its own reset state.
+  - The `LCKR` protection mask shifted its accumulator once more per pin, the last one
+    included, so pin *i* protected pin *15-i*'s field and pin 0's bit was shifted out of
+    the word: locking pin 0 computed `0x300000000` and protected nothing at all.  The
+    mask is now built at each pin's own position (`0x3 << 2i` for
+    `MODER`/`OSPEEDR`/`PUPDR`, `0xF << 4i` for `AFRL`, pins 8-15 for `AFRH`).
+  - A `BSRR` write that named the same pin in both halves ended high, because the set
+    half was applied last.  The reset half has priority (RM0383 8.4.7).
 
 ### Added — the ILI9341 model, and a real Adafruit library drawing on it
 
