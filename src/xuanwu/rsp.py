@@ -220,9 +220,17 @@ class RemoteSerialProtocol(object):
         elif name.startswith(b"P"):
             num_str, val_str = name[1:].split(b"=")
             num = int(num_str, 16)
-            val = int(val_str, 16)
+            # A register value travels in *target* byte order, so `set $r0 = 0x12345678`
+            # arrives as "78563412" and parsing it as a number stored 0x78563412 -- the
+            # value read back byte-swapped.  Decode the bytes and let them mean what
+            # they say; the register is as wide as the target description says.
+            raw = bytes.fromhex(val_str.decode("ascii"))
             for reg, (num_, len_) in self.reg_info.items():
                 if num == num_:
+                    if len(raw) > len_:
+                        logger.warning(f"RSP: register {reg} got {len(raw)} bytes, want {len_}")
+                        raw = raw[:len_]
+                    val = int.from_bytes(raw.ljust(len_, b"\x00"), "little")
                     self._reg.write(reg, val)
                     reply = "OK"
                     break

@@ -185,6 +185,23 @@ class TestStubSurvivesUnsupportedPackets:
         assert body_of(recv_packet(connection)).startswith(b"T")
         assert errors == []
 
+    def test_a_register_write_carries_target_byte_order(self, stub):
+        """``P`` takes the register's bytes, not a number.
+
+        GDB sends ``P0=78563412`` for ``set $r0 = 0x12345678``, because the value
+        travels in target byte order.  Parsing those digits as a number stored
+        0x78563412 instead, so the register read back byte-swapped.
+        """
+        connection, errors, device = stub
+        device.reg.write("r0", 0)
+        send(connection, "P0=78563412")
+        assert body_of(recv_packet(connection)) == b"OK"
+        assert device.reg.read("r0") == 0x1234_5678
+        # And it reads back the way it was written.
+        send(connection, "p0")
+        assert body_of(recv_packet(connection)) == b"78563412"
+        assert errors == []
+
 
 class TestStubControl:
     def test_single_step_advances_pc(self, stub):
