@@ -5,6 +5,65 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the NVIC register layout, the exception engine, and a few quiet no-ops
+
+Found while porting the simulator to Go, where each one had to be either copied or
+fixed deliberately (the port's `docs/plan-go.md`, appendix D, listed them); every fix
+here has a test in `tests/unit/test_regressions.py` or `tests/integration/test_gdb_stub.py`.
+None of them changes what the firmware ladder does -- all sixteen reference traces are
+byte-identical afterwards -- so they are fixes to paths a guest only reaches with
+unusual input.
+
+- **`IPR0` sat at `0x280` instead of `0x300`** (`arch/cortex_m/nvic.py`).  The register
+  template left one 32-word reserved block too few between `IABR0` and the priority
+  registers, so a driver's `NVIC_SetPriority()` -- which writes `0xE000E400`, the
+  architectural `IPR0` -- landed on `IPR32`, while `get_priority()` read `IPR0`.  The
+  priority the guest set was not the priority the model scheduled on.  The declared
+  window (`size: 0x3F0`) was the clue: `0x300` plus 60 priority words.
+- **`ICPR` had a write mask of zero**, so `NVIC_ClearPendingIRQ()` cleared nothing: a
+  `1` written to a bit did not reach the mirror of `ISPR`, and the engine's pending
+  queue was left alone.
+- **The priority mask kept the wrong bits.**  `~((1 << priority_bits) - 1) & 0xFF`
+  masks off the *low* bits; the architecture implements the *top* `priority_bits` of
+  each byte and reads the rest as zero.  The two agree for the four-bit parts every
+  description currently declares, and differ for anything narrower (two bits: `0xFC`
+  versus `0xC0`).
+- **A reserved gap was one multi-word `struct`.**  Writing the first word of, say, the
+  NVIC's 24-word gap raised `struct.error: pack expected 24 items` (it packed one value
+  into a 24-word record), and writing any other word raised
+  `XwInvalidMemoryAddress`.  A reserved word now reads as zero and drops the write,
+  with a debug line; an access that *crosses* a word boundary is still a size error.
+- **`reset()` did not clear the register file.**  Every model calls
+  `ArmHardwareBase.reset()` and then writes its own non-zero reset values, but the base
+  only logged -- so a second reset left whatever the guest had put in the registers of
+  the models that write none of them, the NVIC above all (`ISER`/`ISPR`/`IABR`
+  survived a reset).  It now zeroes the file first.
+- **The exception engine kept its lists across a reset.**  `ArmHardwareController.reset()`
+  reset the models but not `_irq_pending`/`_irq_handling`, so it went on holding
+  exceptions whose pending and active bits the reset had just cleared.  A reset now
+  forgets the handler it was in and returns to thread mode.
+- **`jump_isr` OR-ed the vector table base with the exception offset.**  `vector | (exp
+  << 2)` is the same thing as adding only while bits 7..9 of the base are clear; a
+  table at `0x20000200` fetched the wrong word for every exception from IRQ 112 up.
+- **Tail-chaining was skipped for IRQ 0.**  The check was `if next_irq:`, and IRQ 0's
+  number *is* 0, so returning from a handler with IRQ 0 pending went back to thread
+  mode and re-entered the handler through a full unstack/restack instead of
+  tail-chaining.  The core exceptions are negative in this numbering, so IRQ 0 was the
+  only one affected.
+- **A `svc` instruction, or a `BKPT` with semihosting off, ended with a bare `raise`.**
+  Python turns that into `RuntimeError: No active exception to reraise`, which says
+  nothing about what the guest did.  `svc` now pends `SVCall` (the architecture's
+  behaviour, and how a real-time kernel's system call reaches its handler), and a
+  `BKPT` that is not the semihosting trap raises the new `XwUnsupported` with the
+  address and the semihosting state in the message.
+- **`int(name[-1])` read `ISER10` as `ISER0`** when mirroring a write into the engine's
+  pending queue.  Out of reach with the eight words a 240-interrupt part needs, and
+  wrong the moment a description declares more than 320 lines.
+- **The GDB stub's `P` packet parsed target byte order as a number.**  GDB sends
+  `P0=78563412` for `set $r0 = 0x12345678`, so the register came back byte-swapped
+  (`0x78563412`); the value is now decoded as the register's bytes, and padded or
+  truncated to the width the target description declares.
+
 ### Added — the ILI9341 model, and a real Adafruit library drawing on it
 
 - `src/xuanwu/peripherals/display/`: the panel side of a TFT, with no transport in it.
